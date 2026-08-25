@@ -30,8 +30,56 @@ CREATE TABLE IF NOT EXISTS holding (
   coupon_rate REAL,              -- annual nominal, decimal: 0.05 = 5%
   maturity TEXT,                 -- YYYY-MM-DD
   compound_freq TEXT,            -- monthly | quarterly | annual
-  capitalize INTEGER DEFAULT 1   -- 1 = interest joins principal, 0 = paid out
+  capitalize INTEGER DEFAULT 1,  -- 1 = interest joins principal, 0 = paid out
+  -- 'broker' rows are rebuilt from the trade table on every import: qty and
+  -- buy_price are derived, only the manual price survives. 'manual' rows are yours.
+  source TEXT DEFAULT 'manual',
+  isin TEXT                      -- broker rows only: the key the importer syncs on
 );
+
+-- Broker execution history. One row per fill, not per order: Bossa splits a single
+-- order across commission tiers, so several rows can share a timestamp, symbol and
+-- price and differ only in quantity and commission.
+--
+-- Fills arrive from two exports that overlap. The primary key is therefore natural —
+-- date, instrument, side, quantity, price, currency and an occurrence counter — and
+-- deliberately excludes value/commission/time: hisPW rounds "wartość" its own way
+-- (400 x 21.8385 is filed as 8735.38, not 8735.40) and the cash ledger has no clock,
+-- so anything derived from those would stop the two files recognising a shared fill.
+CREATE TABLE IF NOT EXISTS trade (
+  id TEXT PRIMARY KEY,
+  date TEXT,                     -- YYYY-MM-DD
+  time TEXT,                     -- hisPW only; '' from the cash ledger
+  name TEXT, isin TEXT,
+  side TEXT,                     -- K = buy (kupno), S = sell (sprzedaż)
+  qty REAL, price REAL,
+  value REAL,                    -- qty * price, before commission
+  commission REAL,
+  -- Cash actually moved ("po prowizji"). Buys add the commission, sells subtract it.
+  -- This, not value, is what the cost basis is built from — both files agree on it.
+  net REAL,
+  currency TEXT DEFAULT 'PLN',
+  ref TEXT,                      -- broker order number, when the export carries one
+  source TEXT DEFAULT 'hispw',   -- hispw | cash
+  seq INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS trade_isin ON trade(isin);
+
+-- Brokerage cash ledger ("historia finansowa"): everything that moved cash, not just
+-- fills. Dividends, bond coupons, deposits, FX conversions, tender offers and fees.
+-- There is no running-balance column, so cash is a sum over these rows — only right
+-- if the export starts at account opening.
+CREATE TABLE IF NOT EXISTS cashop (
+  id TEXT PRIMARY KEY,
+  date TEXT,
+  title TEXT, details TEXT,
+  amount REAL,                   -- signed: credits positive, debits negative
+  currency TEXT DEFAULT 'PLN',
+  kind TEXT,                     -- see KINDS in trades.ts
+  symbol TEXT,                   -- instrument the operation is about, when named
+  seq INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS cashop_kind ON cashop(kind);
 
 CREATE TABLE IF NOT EXISTS rule (
   id INTEGER PRIMARY KEY, pattern TEXT, category TEXT
@@ -62,7 +110,11 @@ for (const [table, col, def] of [
 	['holding', 'maturity', 'TEXT'],
 	['holding', 'compound_freq', 'TEXT'],
 	['holding', 'capitalize', 'INTEGER DEFAULT 1'],
-	['account', 'is_cash', 'INTEGER DEFAULT 0']
+	['account', 'is_cash', 'INTEGER DEFAULT 0'],
+	['holding', 'source', "TEXT DEFAULT 'manual'"],
+	['holding', 'isin', 'TEXT'],
+	['trade', 'ref', 'TEXT'],
+	['trade', 'source', "TEXT DEFAULT 'hispw'"]
 ] as const) {
 	const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
 	if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);

@@ -3,14 +3,40 @@ import { fail } from '@sveltejs/kit';
 import { run } from '$lib/server/db';
 import { bondProjection, currentMonth, holdings, investmentTotals } from '$lib/server/stats';
 import { BELKA, PERIODS } from '$lib/server/bonds';
+import {
+	KINDS,
+	cashBalances,
+	cashOps,
+	fxRates,
+	portfolioIncome,
+	positions,
+	tradeTotals,
+	trades
+} from '$lib/server/trades';
 
-export const load: PageServerLoad = () => ({
-	holdings: holdings(),
-	totals: investmentTotals(),
-	projection: bondProjection(),
-	month: currentMonth(),
-	belka: BELKA
-});
+export const load: PageServerLoad = ({ url }) => {
+	const isin = url.searchParams.get('isin') || '';
+	const kind = url.searchParams.get('kind') || '';
+	return {
+		holdings: holdings(),
+		totals: investmentTotals(),
+		projection: bondProjection(),
+		month: currentMonth(),
+		belka: BELKA,
+		positions: positions(),
+		tradeTotals: tradeTotals(),
+		income: portfolioIncome(),
+		cash: cashBalances(),
+		fx: fxRates(),
+		kinds: KINDS,
+		// ponytail: whole history, no paging — a personal broker account is hundreds of
+		// rows, not millions. Add LIMIT/OFFSET like /transactions if it ever drags.
+		trades: trades(isin),
+		ops: cashOps(kind),
+		isin,
+		kind
+	};
+};
 
 const num = (v: FormDataEntryValue | null) => {
 	const n = Number(String(v ?? '').replace(',', '.'));

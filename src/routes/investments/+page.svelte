@@ -1,13 +1,23 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import Chart from '$lib/Chart.svelte';
-	import { money, percent, signed } from '$lib/fmt';
+	import { money, moneyIn, percent, priceIn, signed, signedIn } from '$lib/fmt';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	const stocks = $derived(data.holdings.filter((h) => h.kind === 'stock'));
 	const bonds = $derived(data.holdings.filter((h) => h.kind === 'bond'));
+	// A part-sold position has a realised result too, so key on "has sold", not "is closed".
+	const sold = $derived(data.positions.filter((p) => p.soldQty > 0 || p.dividends));
+	const pln = $derived(data.income.find((i) => i.currency === 'PLN'));
+	const brokerCash = $derived(data.cash.find((c) => c.currency === 'PLN'));
+
+	/** Only ever a label: the app converts nothing, it just refuses to leave USD unreadable. */
+	const inPln = (amount: number, currency: string) => {
+		const fx = data.fx.find((f) => f.pair.endsWith('/' + currency));
+		return fx ? `≈ ${money(amount * fx.rate)} at ${fx.rate} (${fx.date})` : '';
+	};
 
 	const bondTotals = $derived({
 		principal: bonds.reduce((s, b) => s + b.cost, 0),
@@ -93,24 +103,65 @@
 
 <h1>Investments</h1>
 
-{#if data.totals.cost}
+{#if data.totals.cost || brokerCash}
 	<div class="grid">
 		<div class="panel kpi">
-			<div class="label">Current value</div>
+			<div class="label">Portfolio value</div>
 			<div class="value">{money(data.totals.value)}</div>
+			<div class="sub">cost {money(data.totals.cost)}</div>
 		</div>
 		<div class="panel kpi">
-			<div class="label">Cost basis</div>
-			<div class="value">{money(data.totals.cost)}</div>
-		</div>
-		<div class="panel kpi">
-			<div class="label">Profit / loss</div>
+			<div class="label">Unrealised P/L</div>
 			<div class="value" class:pos={data.totals.pl >= 0} class:neg={data.totals.pl < 0}>
 				{signed(data.totals.pl)}
 				<span style="font-size:1rem">({percent(data.totals.plPct)})</span>
 			</div>
+			<div class="sub">on what you still hold</div>
 		</div>
+		{#if pln}
+			<div class="panel kpi">
+				<div class="label">Realised P/L</div>
+				<div class="value" class:pos={pln.realized >= 0} class:neg={pln.realized < 0}>
+					{signed(pln.realized)}
+				</div>
+				<div class="sub">banked on closed lots</div>
+			</div>
+			<div class="panel kpi">
+				<div class="label">Dividends & interest</div>
+				<div class="value pos">{money(pln.dividends + pln.coupons)}</div>
+				<div class="sub">paid into the account</div>
+			</div>
+			<div class="panel kpi">
+				<div class="label">Money made</div>
+				<div class="value" class:pos={pln.total >= 0} class:neg={pln.total < 0}>
+					{signed(pln.total)}
+				</div>
+				<div class="sub">everything but your own deposits</div>
+			</div>
+		{/if}
+		{#if brokerCash}
+			<div class="panel kpi">
+				<div class="label">Brokerage cash</div>
+				<div class="value">{money(brokerCash.balance)}</div>
+				<div class="sub">uninvested, from the ledger</div>
+			</div>
+		{/if}
 	</div>
+
+	{#if data.totals.byCurrency.length}
+		<p class="warn" style="margin-top:1rem">
+			Not in the figures above — the app does no FX conversion:
+			{#each data.totals.byCurrency as c (c.currency)}
+				<strong>{moneyIn(c.value, c.currency)}</strong> of holdings
+				<span class="note">({inPln(c.value, c.currency)})</span>{' '}
+			{/each}
+			{#each data.cash.filter((c) => c.currency !== 'PLN') as c (c.currency)}
+				and <strong>{moneyIn(c.balance, c.currency)}</strong> of cash
+				<span class="note">({inPln(c.balance, c.currency)})</span>
+			{/each}
+			. The rate shown is the one you last converted at, for reading only.
+		</p>
+	{/if}
 {/if}
 
 <!-- ── Stocks ───────────────────────────────────────────── -->
@@ -127,10 +178,13 @@
 			<tbody>
 				{#each stocks as h (h.id)}
 					<tr>
-						<td><strong>{h.ticker}</strong></td>
+						<td>
+							<strong>{h.ticker}</strong>
+							{#if h.source === 'broker'}<span class="badge">Bossa</span>{/if}
+						</td>
 						<td>{h.name}<div class="note">bought {h.buy_date || '—'}</div></td>
 						<td class="num">{h.qty}</td>
-						<td class="num">{money(h.buy_price)}</td>
+						<td class="num">{priceIn(h.buy_price, h.currency)}</td>
 						<td class="num">
 							<form method="POST" action="?/setPrice" class="row" use:enhance>
 								<input type="hidden" name="id" value={h.id} />
@@ -139,20 +193,31 @@
 							</form>
 							<div class="note">{h.price_at ? `as of ${h.price_at}` : 'no price set — using buy price'}</div>
 						</td>
-						<td class="num">{money(h.value)}</td>
+						<td class="num">{moneyIn(h.value, h.currency)}</td>
 						<td class="num" class:pos={h.pl >= 0} class:neg={h.pl < 0}>
-							{signed(h.pl)}<div class="note">{percent(h.plPct)}</div>
+							{signedIn(h.pl, h.currency)}<div class="note">{percent(h.plPct)}</div>
 						</td>
 						<td class="num">
-							<form method="POST" action="?/remove" use:enhance>
-								<input type="hidden" name="id" value={h.id} />
-								<button class="danger" type="submit">Delete</button>
-							</form>
+							{#if h.source === 'broker'}
+								<span class="note">imported</span>
+							{:else}
+								<form method="POST" action="?/remove" use:enhance>
+									<input type="hidden" name="id" value={h.id} />
+									<button class="danger" type="submit">Delete</button>
+								</form>
+							{/if}
 						</td>
 					</tr>
 				{/each}
 			</tbody>
 		</table>
+		{#if stocks.some((h) => h.source === 'broker')}
+			<p class="note" style="margin-top:.5rem">
+				<span class="badge">Bossa</span> rows come from the imported trade history — quantity and
+				buy price are the FIFO cost of the lots still open, commission included. Re-importing
+				rebuilds them, so edit them at the broker, not here. The price is still yours to type.
+			</p>
+		{/if}
 	{:else}
 		<p class="note">No stocks yet.</p>
 	{/if}
@@ -169,6 +234,219 @@
 		<button type="submit">Add stock</button>
 	</form>
 </div>
+
+<!-- ── Broker history ───────────────────────────────────── -->
+{#if data.trades.length}
+	{#if sold.length}
+		<div class="panel scroll" style="margin-top:1rem">
+			<h2>What each instrument made</h2>
+			<table>
+				<thead>
+					<tr>
+						<th>Instrument</th><th class="num">Bought</th><th class="num">Sold</th>
+						<th class="num">Still held</th><th class="num">Commission</th>
+						<th class="num">Realised P/L</th><th class="num">Dividends</th><th class="num">Total</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each sold as p (p.isin + p.currency)}
+						<tr>
+							<td>
+								<strong>{p.name}</strong>
+								{#if p.currency !== 'PLN'}<span class="badge">{p.currency}</span>{/if}
+								{#if p.inferred}<span class="badge">tendered</span>{/if}
+								<div class="note">{p.isin}</div>
+							</td>
+							<td class="num">{p.boughtQty}</td>
+							<td class="num">{p.soldQty}</td>
+							<td class="num">{p.openQty || '—'}</td>
+							<td class="num">{moneyIn(p.commission, p.currency)}</td>
+							<td class="num" class:pos={p.realized >= 0} class:neg={p.realized < 0}>
+								{signedIn(p.realized, p.currency)}
+								{#if p.unmatchedQty}
+									<div class="warn">{p.unmatchedQty} sold with no purchase imported</div>
+								{/if}
+							</td>
+							<td class="num pos">{p.dividends ? moneyIn(p.dividends, p.currency) : '—'}</td>
+							<td
+								class="num"
+								class:pos={p.realized + p.dividends >= 0}
+								class:neg={p.realized + p.dividends < 0}
+							>
+								<strong>{signedIn(p.realized + p.dividends, p.currency)}</strong>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+			<p class="note" style="margin-top:.5rem">
+				FIFO matching — the oldest lot is sold first, per instrument <em>and per currency</em>,
+				because the same ISIN can trade on two markets with two cost bases. Both commissions are
+				inside the realised figure, so it is cash actually made. Gross of the
+				{percent(data.belka)} Belka tax. Amounts are in each row's own currency.
+			</p>
+			{#if data.tradeTotals.inferred.length}
+				<p class="warn">
+					Tender offer{data.tradeTotals.inferred.length > 1 ? 's' : ''} on
+					{data.tradeTotals.inferred.map((p) => p.name).join(', ')}: the ledger gives the cash
+					but not the quantity, so the whole open position was taken as tendered. Correct if the
+					tender settled in full — check it if yours was partial.
+				</p>
+			{/if}
+			{#if data.tradeTotals.orphans.length}
+				<p class="warn">
+					Ledger operations naming an instrument with no imported trades:
+					{data.tradeTotals.orphans.map((o) => `${o.symbol} (${money(o.total)})`).join(', ')}.
+					Import the fills for those and they will be attributed.
+				</p>
+			{/if}
+		</div>
+	{/if}
+
+	{#if data.income.length}
+		<div class="panel scroll" style="margin-top:1rem">
+			<h2>Where the money came from</h2>
+			<table>
+				<thead>
+					<tr>
+						<th></th><th class="num">Realised gains</th><th class="num">Dividends</th>
+						<th class="num">Bond interest</th><th class="num">Bond principal</th>
+						<th class="num">Fees</th><th class="num">Money made</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each data.income as i (i.currency)}
+						<tr>
+							<td><strong>{i.currency}</strong></td>
+							<td class="num" class:pos={i.realized >= 0} class:neg={i.realized < 0}>
+								{signedIn(i.realized, i.currency)}
+							</td>
+							<td class="num pos">{i.dividends ? signedIn(i.dividends, i.currency) : '—'}</td>
+							<td class="num pos">{i.coupons ? signedIn(i.coupons, i.currency) : '—'}</td>
+							<td class="num" class:pos={i.bond >= 0} class:neg={i.bond < 0}>
+								{i.bond ? signedIn(i.bond, i.currency) : '—'}
+							</td>
+							<td class="num neg">{i.fees ? signedIn(i.fees, i.currency) : '—'}</td>
+							<td class="num" class:pos={i.total >= 0} class:neg={i.total < 0}>
+								<strong>{signedIn(i.total, i.currency)}</strong>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+			<p class="note" style="margin-top:.5rem">
+				Figures are per currency, unconverted. <em>Bond principal</em> nets subscriptions,
+				oversubscription refunds and redemptions together, so it shows the result on the bond
+				rather than counting the principal coming back as income.
+				{#each data.income.filter((i) => i.deposits) as i (i.currency)}
+					Your own deposits — {moneyIn(i.deposits, i.currency)} — are listed in the ledger below
+					but never counted here: moving money in is not a gain.
+				{/each}
+			</p>
+		</div>
+	{/if}
+
+	<div class="panel scroll" style="margin-top:1rem">
+		<h2>Trade history</h2>
+		<form class="row" style="margin-bottom:.75rem">
+			<label class="field">
+				Instrument
+				<select name="isin">
+					<option value="">All</option>
+					{#each data.positions as p (p.isin + p.currency)}
+						<option value={p.isin} selected={data.isin === p.isin}>
+							{p.name} ({p.currency})
+						</option>
+					{/each}
+				</select>
+			</label>
+			<button type="submit">Filter</button>
+			{#if data.isin}<a href="/investments" class="note" style="padding:.4rem">Reset</a>{/if}
+		</form>
+
+		<table>
+			<thead>
+				<tr>
+					<th>Date</th><th>Instrument</th><th>Side</th><th class="num">Qty</th>
+					<th class="num">Price</th><th class="num">Commission</th><th class="num">Cash</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each data.trades as t (t.id)}
+					<tr>
+						<td>{t.date}{#if t.time}<div class="note">{t.time}</div>{/if}</td>
+						<td>{t.name}</td>
+						<td class:pos={t.side === 'S'} class:neg={t.side === 'K'}>
+							{t.side === 'K' ? 'Buy' : 'Sell'}
+						</td>
+						<td class="num">{t.qty}</td>
+						<td class="num">{priceIn(t.price, t.currency)}</td>
+						<td class="num">{moneyIn(t.commission, t.currency)}</td>
+						<td class="num" class:pos={t.side === 'S'} class:neg={t.side === 'K'}>
+							{signedIn(t.side === 'S' ? t.net : -t.net, t.currency)}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+		<p class="note" style="margin-top:.5rem">
+			{data.trades.length} fills{data.isin ? ' (filtered)' : ''}. Bossa splits one order across
+			commission tiers, so several rows can share a timestamp and price.
+		</p>
+	</div>
+{/if}
+
+<!-- ── Cash ledger ──────────────────────────────────────── -->
+{#if data.ops.length || data.kind}
+	<div class="panel scroll" style="margin-top:1rem">
+		<h2>Brokerage cash ledger</h2>
+		<form class="row" style="margin-bottom:.75rem">
+			<label class="field">
+				Type
+				<select name="kind">
+					<option value="">All</option>
+					{#each Object.entries(data.kinds) as [k, label] (k)}
+						<option value={k} selected={data.kind === k}>{label}</option>
+					{/each}
+				</select>
+			</label>
+			<button type="submit">Filter</button>
+			{#if data.kind}<a href="/investments" class="note" style="padding:.4rem">Reset</a>{/if}
+		</form>
+
+		<table>
+			<thead>
+				<tr>
+					<th>Date</th><th>Type</th><th>Operation</th><th class="num">Amount</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each data.ops as o (o.id)}
+					<tr>
+						<td>{o.date}</td>
+						<td><span class="badge">{data.kinds[o.kind] ?? o.kind}</span></td>
+						<td>
+							{o.title}
+							{#if o.details}<div class="note">{o.details}</div>{/if}
+						</td>
+						<td class="num" class:pos={o.amount >= 0} class:neg={o.amount < 0}>
+							{moneyIn(o.amount, o.currency)}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+		<p class="note" style="margin-top:.5rem">
+			{data.ops.length} operations{data.kind ? ' (filtered)' : ''}.
+			{#each data.cash as c (c.currency)}
+				Balance {moneyIn(c.balance, c.currency)} ({c.from} to {c.to}).
+			{/each}
+			This is a running sum — the export carries no balance column, so it is only right if
+			your file starts at account opening. If you also track this brokerage as a manual
+			account, untick it on Accounts so it is not counted twice.
+		</p>
+	</div>
+{/if}
 
 <!-- ── Bonds ────────────────────────────────────────────── -->
 <div class="panel scroll" style="margin-top:1rem">

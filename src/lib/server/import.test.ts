@@ -73,3 +73,209 @@ test('net worth uses the bank Saldo and reacts to holdings', () => {
 	assert.ok(Math.abs(inv.plPct - 0.2) < 1e-9);
 	assert.ok(Math.abs(stats.netWorth().total - (before + 1200)) < 0.01);
 });
+
+// ── Bossa brokerage: fills (hisPW) and cash ledger (historia finansowa) ─────
+
+const T = await import('./trades.ts');
+const CASH_FILE =
+	'2026-08-25 19-41-51_historia_finansowa_wszystkie_810414_2019-08-01_2026-08-25.csv';
+
+const hisPW = () => T.parseBossa(T.decodeBossa(readFileSync('hisPW (1).csv')));
+const ledger = () => T.parseCash(T.decodeBossa(readFileSync(CASH_FILE)));
+const byName = () => new Map(T.positions().map((p) => [`${p.name}|${p.currency}`, p]));
+
+test('parses the real hisPW export out of Windows-1250 bytes', () => {
+	const rows = hisPW();
+	assert.equal(rows.length, 51);
+	assert.equal(new Set(rows.map((r) => r.id)).size, 51, 'fill keys must be unique');
+	assert.ok(rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date)));
+
+	const [first] = rows;
+	assert.deepEqual(
+		{ date: first.date, name: first.name, side: first.side, qty: first.qty, net: first.net },
+		{ date: '2026-08-14', name: 'XTB', side: 'S', qty: 80, net: 13857.54 }
+	);
+});
+
+test('a fill file whose own arithmetic is wrong is rejected', () => {
+	const head = 'data;papier;isin;ilość;-;cena;wartość;prowizja;po prowizji;waluta\n';
+	assert.throws(
+		() => T.parseBossa(head + '01.02.2024 10:00:00;X;PL1;10;K;10,00;100,00;5,00;100,00;PLN'),
+		/po prowizji/
+	);
+	assert.throws(() => T.parseBossa('data;papier;isin\n'), /Missing column/);
+	assert.throws(
+		() => T.parseBossa(head + '01.02.2024 10:00:00;X;PL1;10;Z;10,00;100,00;0,00;100,00;PLN'),
+		/unknown side/
+	);
+});
+
+test('parses the ledger and classifies every operation in it', () => {
+	const { ops, trades } = ledger();
+	assert.equal(ops.length, 154);
+	assert.equal(new Set(ops.map((o) => o.id)).size, 154, 'operation keys must be unique');
+	assert.equal(trades.length, 67, 'fills split back out of the settlement rows');
+	assert.ok(!ops.some((o) => o.kind === 'other'), 'nothing in this file should fall through');
+
+	const n = (kind: string) => ops.filter((o) => o.kind === kind).length;
+	assert.equal(n('trade'), 67);
+	assert.equal(n('dividend'), 34);
+	assert.equal(n('coupon'), 19);
+	assert.equal(n('bond'), 3, 'subscription, refund and redemption');
+	assert.equal(n('deposit'), 15);
+	assert.equal(n('fx'), 6);
+	assert.equal(n('tender'), 1, '"- prowizja TIM" is a fee, not a payout');
+	assert.equal(n('fee'), 9);
+	assert.equal(ops.reduce((s, o) => s + 1, 0), 67 + 34 + 19 + 3 + 15 + 6 + 1 + 9, 'every row classified');
+
+	// The symbol has to survive both spellings of a dividend title.
+	const div = ops.filter((o) => o.kind === 'dividend').map((o) => o.symbol);
+	assert.ok(div.includes('ASBIS'), 'Wypłata dywidendy brutto ASBIS');
+	assert.ok(div.includes('XTB'), 'Wypłata dywidendy XTB');
+	assert.ok(!div.some((s) => s.includes('brutto')));
+
+	// USD fills exist only in this file; hisPW is one market.
+	assert.equal(trades.filter((t) => t.currency === 'USD').length, 16);
+});
+
+test('the two exports recognise the fills they share', () => {
+	assert.deepEqual(T.importTrades(hisPW()), { added: 51, skipped: 0 });
+
+	// All 51 PLN fills are already known; only the 16 USD ones are new. The natural key
+	// has to survive hisPW filing 400 x 21.8385 as 8735.38 rather than 8735.40.
+	const first = T.importCash(ledger());
+	assert.equal(first.added, 154);
+	assert.equal(first.fills, 16, 'PLN fills must collapse onto the hisPW rows');
+	assert.equal(T.trades().length, 67);
+
+	assert.deepEqual(T.importCash(ledger()), { added: 0, skipped: 154, fills: 0 });
+	assert.deepEqual(T.importTrades(hisPW()), { added: 0, skipped: 51 });
+	assert.equal(T.trades().length, 67);
+});
+
+test('the same ISIN on two markets keeps two cost bases', () => {
+	const by = byName();
+	// Energy Fuels: 372 bought and sold in PLN on the GPW, 1200 bought and 1050 sold in
+	// USD on XASE. One FIFO queue for both would price USD lots at PLN cost.
+	const pln = by.get('Energy Fuels Inc.|PLN')!;
+	const usd = by.get('Energy Fuels Inc.|USD')!;
+	assert.equal(pln.openQty, 0);
+	assert.equal(usd.openQty, 150);
+	assert.equal(usd.boughtQty, 1200);
+	assert.equal(usd.soldQty, 1050);
+	assert.ok(Math.abs(pln.realized - (9122.02 + 1930.77 - 6663.46)) < 0.01);
+	assert.ok(usd.realized > 0);
+	assert.deepEqual(T.tradeTotals().unmatched, [], 'nothing sold without a purchase');
+});
+
+test('a tender offer closes the position it paid for', () => {
+	// TIM was bought twice (120 shares, 2958.20) and never sold on the exchange, so it
+	// only leaves the portfolio via "Rozliczenie wezwania TIM" — 6082.80, no quantity.
+	const tim = byName().get('TIM|PLN')!;
+	assert.equal(tim.openQty, 0, 'a tendered position is not still held');
+	assert.equal(tim.soldQty, 120);
+	assert.equal(tim.inferred, true, 'the quantity was assumed, and must be flagged');
+	assert.ok(Math.abs(tim.realized - (6082.8 - 2958.2)) < 0.01, `${tim.realized}`);
+	assert.deepEqual(
+		T.tradeTotals().inferred.map((p) => p.name),
+		['TIM']
+	);
+	assert.equal(get(`SELECT 1 FROM holding WHERE isin = 'PLTIM0000016'`), undefined);
+});
+
+test('dividends land on the instrument that paid them', () => {
+	const by = byName();
+	assert.ok(Math.abs(by.get('XTB|PLN')!.dividends - 6708.3) < 0.01);
+	assert.ok(Math.abs(by.get('ASBIS|PLN')!.dividends - 2715.44) < 0.01);
+	assert.equal(by.get('CDPROJEKT|PLN')!.dividends, 0);
+	assert.deepEqual(T.tradeTotals().orphans, [], 'every payer matches an imported instrument');
+});
+
+test('money made counts gains and income but never your own deposits', () => {
+	const [pln] = T.portfolioIncome().filter((i) => i.currency === 'PLN');
+	assert.ok(Math.abs(pln.dividends - 13656.89) < 0.01, `dividends ${pln.dividends}`);
+	assert.ok(Math.abs(pln.coupons - 19.96) < 0.01, `coupons ${pln.coupons}`);
+	// -1000 subscribed, +900 refunded, +101.06 redeemed: the bond returned its 1.06 coupon,
+	// not 101.06 of income.
+	assert.ok(Math.abs(pln.bond - 1.06) < 0.01, `bond ${pln.bond}`);
+	assert.ok(Math.abs(pln.fees + 73.46) < 0.01, `fees ${pln.fees}`);
+	assert.equal(pln.deposits, 70000);
+	assert.ok(
+		Math.abs(pln.total - (pln.realized + pln.dividends + pln.coupons + pln.bond + pln.fees)) < 1e-9,
+		'deposits must be outside the total'
+	);
+});
+
+test('cash balance and net worth pick up the brokerage', () => {
+	const cash = T.cashBalances();
+	assert.ok(Math.abs(cash.find((c) => c.currency === 'PLN')!.balance - 38487.91) < 0.01);
+	assert.ok(Math.abs(cash.find((c) => c.currency === 'USD')!.balance - 7614.08) < 0.01);
+	assert.deepEqual(T.fxRates(), [{ date: '2024-10-29', pair: 'PLN/USD', rate: 4.0317 }]);
+
+	const nw = stats.netWorth();
+	assert.ok(nw.parts.some((p) => p.label === 'Brokerage cash' && Math.abs(p.value - 38487.91) < 0.01));
+
+	// USD holdings must not be added to PLN at 1:1 — they come back separately.
+	const inv = stats.investmentTotals();
+	assert.deepEqual(
+		inv.byCurrency.map((c) => c.currency),
+		['USD']
+	);
+	const plnHoldings = all<{ v: number }>(
+		`SELECT SUM(qty * buy_price) v FROM holding WHERE currency = 'PLN'`
+	)[0].v;
+	assert.ok(Math.abs(inv.cost - plnHoldings) < 0.01, 'PLN cost basis only');
+});
+
+test('a sell with no purchase imported is flagged, not counted as pure profit', () => {
+	const rows = T.parseBossa(
+		'data;papier;isin;ilość;-;cena;wartość;prowizja;po prowizji;waluta\n' +
+			'01.02.2024 10:00:00;GHOST;PLGHOST0001;100;S;10,00;1000,00;3,80;996,20;PLN'
+	);
+	assert.deepEqual(T.importTrades(rows), { added: 1, skipped: 0 });
+
+	const ghost = T.positions().find((p) => p.isin === 'PLGHOST0001')!;
+	assert.equal(ghost.unmatchedQty, 100);
+	assert.equal(ghost.realized, 0, 'no cost basis means no P/L claim');
+	assert.equal(ghost.openQty, 0);
+	assert.deepEqual(
+		T.tradeTotals().unmatched.map((p) => p.isin),
+		['PLGHOST0001']
+	);
+	run(`DELETE FROM trade WHERE isin = 'PLGHOST0001'`);
+});
+
+test('a repeated identical fill survives as two lots', () => {
+	// Energy Fuels sold 100 at 5.63 twice on the same day, under two order numbers.
+	const same = T.trades().filter(
+		(t) => t.date === '2025-06-03' && t.qty === 100 && t.price === 5.63
+	);
+	assert.equal(same.length, 2, 'a natural key must still separate genuine repeats');
+	assert.equal(new Set(same.map((t) => t.id)).size, 2);
+});
+
+test('open positions become priceable holdings and survive a re-import', () => {
+	T.importTrades(hisPW());
+	const broker = all<{ isin: string; currency: string; price: number | null }>(
+		`SELECT isin, currency, price FROM holding WHERE source = 'broker'`
+	);
+	assert.equal(broker.length, T.positions().filter((p) => p.openQty > 1e-9).length);
+	assert.equal(broker.length, 10, 'nine instruments, one of them open in two currencies');
+	assert.ok(broker.some((h) => h.currency === 'USD'), 'USD positions are held too');
+	assert.ok(broker.every((h) => h.price === null), "prices are the user's to type");
+
+	// A hand-typed price must not be wiped by the next import.
+	run(`UPDATE holding SET price = 99, price_at = '2026-08-25' WHERE isin = 'PLXTRDM00011'`);
+	T.importCash(ledger());
+	const xtb = get<{ price: number; qty: number }>(
+		`SELECT price, qty FROM holding WHERE isin = 'PLXTRDM00011'`
+	)!;
+	assert.equal(xtb.price, 99);
+	assert.equal(xtb.qty, 220);
+
+	// Selling out drops the holding, and only for the currency that closed.
+	run(`DELETE FROM trade WHERE isin = 'CA2926717083' AND side = 'K' AND currency = 'USD'`);
+	T.syncBrokerHoldings();
+	assert.equal(get(`SELECT 1 FROM holding WHERE isin = 'CA2926717083'`), undefined);
+	assert.ok(get(`SELECT 1 FROM holding WHERE isin = 'PLXTRDM00011'`), 'PLN sleeve untouched');
+});

@@ -1,5 +1,6 @@
 import { all, get } from './db.ts';
 import { type Bond, interestTo, project, totalInterest, valueAt } from './bonds.ts';
+import { brokerCash } from './trades.ts';
 
 /** Every income/expense figure is PLN-only and excludes own-account transfers. */
 const REAL = `transfer = 0 AND currency = 'PLN'`;
@@ -87,6 +88,9 @@ export type Holding = {
 	maturity: string | null;
 	compound_freq: Bond['compound_freq'] | null;
 	capitalize: number;
+	/** 'broker' rows are derived from the trade table; 'manual' ones were typed in. */
+	source: string;
+	isin: string | null;
 };
 
 /** A bond is only projectable once it has a rate, a maturity and a frequency. */
@@ -126,20 +130,38 @@ export function bonds(): Bond[] {
 
 export const bondProjection = () => project(bonds());
 
+/**
+ * PLN only. Brokerage imports bring in USD positions and the app does no FX, so
+ * adding them at 1:1 would quietly inflate net worth — they come back under
+ * `byCurrency` instead, for the UI to show beside the PLN figure.
+ */
 export function investmentTotals() {
 	const hs = holdings();
-	const cost = hs.reduce((s, h) => s + h.cost, 0);
-	const value = hs.reduce((s, h) => s + h.value, 0);
-	return { cost, value, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
+	const sum = (list: typeof hs) => {
+		const cost = list.reduce((s, h) => s + h.cost, 0);
+		const value = list.reduce((s, h) => s + h.value, 0);
+		return { cost, value, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
+	};
+	const currencies = [...new Set(hs.map((h) => h.currency))];
+	return {
+		...sum(hs.filter((h) => h.currency === 'PLN')),
+		byCurrency: currencies
+			.filter((c) => c !== 'PLN')
+			.map((currency) => ({ currency, ...sum(hs.filter((h) => h.currency === currency)) }))
+	};
 }
 
 export function netWorth() {
 	const bank = bankBalances().filter((b) => b.currency === 'PLN');
 	const manual = manualBalances().filter((m) => m.currency === 'PLN');
 	const inv = investmentTotals();
+	const cash = brokerCash();
 	const parts = [
 		...bank.map((b) => ({ label: b.label, value: b.balance, as_of: b.date })),
 		...manual.map((m) => ({ label: m.label, value: m.value, as_of: m.month })),
+		// The broker's cash ledger has no balance column, so this is a running sum of
+		// every operation imported — right only if the export starts at account opening.
+		...(cash ? [{ label: 'Brokerage cash', value: cash, as_of: 'ledger' }] : []),
 		...(inv.value ? [{ label: 'Investments', value: inv.value, as_of: 'now' }] : [])
 	];
 	return { parts, total: parts.reduce((s, p) => s + p.value, 0) };
@@ -196,14 +218,16 @@ export function projectionDefaults() {
 	const t = totals(ALL_TIME);
 	const hs = holdings();
 
-	const stockValue = hs.filter((h) => h.kind === 'stock').reduce((s, h) => s + h.value, 0);
-	const bondValue = hs.filter((h) => h.kind === 'bond').reduce((s, h) => s + h.value, 0);
+	// PLN only, to match `start` — the app does no FX.
+	const pln = hs.filter((h) => h.currency === 'PLN');
+	const stockValue = pln.filter((h) => h.kind === 'stock').reduce((s, h) => s + h.value, 0);
+	const bondValue = pln.filter((h) => h.kind === 'bond').reduce((s, h) => s + h.value, 0);
 	const invested = stockValue + bondValue;
 
 	// Weighted average coupon of the bonds actually held, so the bond leg starts honest.
-	const bondPrincipal = hs.filter((h) => h.isBond).reduce((s, h) => s + h.cost, 0);
+	const bondPrincipal = pln.filter((h) => h.isBond).reduce((s, h) => s + h.cost, 0);
 	const weightedCoupon = bondPrincipal
-		? hs.filter((h) => h.isBond).reduce((s, h) => s + (h.coupon_rate ?? 0) * h.cost, 0) /
+		? pln.filter((h) => h.isBond).reduce((s, h) => s + (h.coupon_rate ?? 0) * h.cost, 0) /
 			bondPrincipal
 		: 0.05;
 
