@@ -45,12 +45,9 @@ export type Trade = {
 	side: 'K' | 'S';
 	qty: number;
 	price: number;
-	value: number;
 	commission: number;
 	net: number;
 	currency: string;
-	ref: string;
-	source: 'hispw' | 'cash';
 	seq: number;
 };
 
@@ -102,21 +99,21 @@ export function parseBossa(text: string): Trade[] {
 				side: side as 'K' | 'S',
 				qty: num(f[cQty]),
 				price: num(f[cPrice]),
-				value: num(f[cValue]),
 				commission: num(f[cComm]),
 				net: num(f[cNet]),
 				currency: f[cCur] || 'PLN',
-				ref: '',
-				source: 'hispw' as const,
 				seq: n
 			};
-			if (![t.qty, t.price, t.value, t.commission, t.net].every(Number.isFinite))
+			// "wartość" is never stored — it is qty * price, give or take the broker's own
+			// rounding — but it has to be read to check the file against itself.
+			const value = num(f[cValue]);
+			if (![t.qty, t.price, value, t.commission, t.net].every(Number.isFinite))
 				throw new Error(`Row ${n + 2}: unparseable number`);
 			if (!(t.qty > 0)) throw new Error(`Row ${n + 2}: quantity must be positive`);
 
 			// Trust the file, but refuse one whose own arithmetic disagrees — a wrong
 			// "po prowizji" would silently poison every cost basis downstream.
-			const expected = t.side === 'K' ? t.value + t.commission : t.value - t.commission;
+			const expected = t.side === 'K' ? value + t.commission : value - t.commission;
 			if (Math.abs(expected - t.net) > 0.02)
 				throw new Error(`Row ${n + 2}: "po prowizji" ${t.net} ≠ ${expected.toFixed(2)}`);
 			return t;
@@ -247,12 +244,9 @@ export function parseCash(text: string): { ops: CashOp[]; trades: Trade[] } {
 			side,
 			qty: Number(qty),
 			price: Number(price),
-			value,
 			commission: round(side === 'K' ? Math.abs(amount) - value : value - Math.abs(amount)),
 			net: Math.abs(amount),
 			currency,
-			ref: m[6],
-			source: 'cash',
 			seq: n
 		});
 	});
@@ -265,8 +259,8 @@ export function parseCash(text: string): { ops: CashOp[]; trades: Trade[] } {
 const insertTrades = (list: Trade[]) => {
 	const ins = db.prepare(`
 		INSERT OR IGNORE INTO trade
-			(id, date, time, name, isin, side, qty, price, value, commission, net, currency, ref, source, seq)
-		VALUES (:id, :date, :time, :name, :isin, :side, :qty, :price, :value, :commission, :net, :currency, :ref, :source, :seq)
+			(id, date, time, name, isin, side, qty, price, commission, net, currency, seq)
+		VALUES (:id, :date, :time, :name, :isin, :side, :qty, :price, :commission, :net, :currency, :seq)
 	`);
 	let added = 0;
 	for (const t of list) added += Number(ins.run({ ...t }).changes);
@@ -539,15 +533,11 @@ export function portfolioIncome(): Income[] {
 		.sort((a, b) => b.total - a.total);
 }
 
+/** The two things the portfolio can't tell you from its own numbers, so the UI must. */
 export function tradeTotals() {
 	const ps = positions();
-	const pln = (f: (p: Position) => number) =>
-		ps.filter((p) => p.currency === 'PLN').reduce((s, p) => s + f(p), 0);
 	return {
-		realized: pln((p) => p.realized),
-		commission: pln((p) => p.commission),
-		cost: pln((p) => p.cost),
-		unmatched: ps.filter((p) => p.unmatchedQty > 0),
+		/** Positions whose quantity was assumed from a tender offer's cash. */
 		inferred: ps.filter((p) => p.inferred),
 		/** Ledger operations that name an instrument nothing in the trade history matches. */
 		orphans: all<{ symbol: string; kind: string; n: number; total: number }>(

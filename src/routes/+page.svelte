@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Chart from '$lib/Chart.svelte';
-	import { money, percent, signed, colorFor } from '$lib/fmt';
+	import { money, moneyIn, percent, signed, colorFor } from '$lib/fmt';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -49,25 +49,49 @@
 		}
 	});
 
-	const netWorthLine = $derived({
+	const legend = { labels: { color: '#8b93a7' } };
+	const stacked = { x: { stacked: true, grid, ticks }, y: { stacked: true, grid, ticks } };
+
+	const expensesByCategory = $derived.by(() => {
+		const months = data.monthly.map((m) => m.month);
+		const cats = [...new Set(data.monthlyByCategory.map((r) => r.category))];
+		const at = new Map(data.monthlyByCategory.map((r) => [`${r.month}|${r.category}`, r.total]));
+		return {
+			type: 'bar' as const,
+			data: {
+				labels: months,
+				datasets: cats.map((c) => ({
+					label: c,
+					data: months.map((m) => at.get(`${m}|${c}`) ?? 0),
+					backgroundColor: colorFor(c)
+				}))
+			},
+			options: {
+				maintainAspectRatio: false,
+				scales: stacked,
+				plugins: { legend, tooltip: { mode: 'index' as const, intersect: false } }
+			}
+		};
+	});
+
+	const netWorthArea = $derived({
 		type: 'line' as const,
 		data: {
-			labels: data.netWorthSeries.map((p) => p.month),
-			datasets: [
-				{
-					label: 'Net worth',
-					data: data.netWorthSeries.map((p) => p.total),
-					borderColor: '#60a5fa',
-					backgroundColor: '#60a5fa22',
-					fill: true,
-					tension: 0.25
-				}
-			]
+			labels: data.netWorthSeries.months,
+			datasets: data.netWorthSeries.sources.map((s) => ({
+				label: s.label,
+				data: s.values,
+				borderColor: colorFor(s.label),
+				backgroundColor: colorFor(s.label, 0.35),
+				fill: true,
+				pointRadius: 0,
+				tension: 0.25
+			}))
 		},
 		options: {
 			maintainAspectRatio: false,
-			scales: axes,
-			plugins: { legend: { display: false } }
+			scales: { x: { grid, ticks }, y: { stacked: true, grid, ticks } },
+			plugins: { legend, tooltip: { mode: 'index' as const, intersect: false } }
 		}
 	});
 </script>
@@ -143,11 +167,17 @@
 	</div>
 
 	<div class="panel" style="margin-top:1rem">
-		<h2>Accounts over time</h2>
-		<Chart config={netWorthLine} />
+		<h2>Expenses by category and month</h2>
+		<Chart config={expensesByCategory} height={320} />
+	</div>
+
+	<div class="panel" style="margin-top:1rem">
+		<h2>Net worth by source</h2>
+		<Chart config={netWorthArea} height={320} />
 		<p class="note">
-			Bank balances and manual snapshots only. Holdings are excluded here because there is no price
-			history to back-date them — see <a href="/investments">Investments</a> for those.
+			Bank balances and manual snapshots are the ones the bank or you stated. Stocks are carried at
+			cost, not market value, because there is no price history to back-date them — see
+			<a href="/investments">Investments</a> for today's valuation. Bonds are accrued to each month.
 		</p>
 	</div>
 
@@ -155,9 +185,16 @@
 		<div class="panel" style="margin-top:1rem">
 			{#each data.excluded as e (e.currency)}
 				<p class="note">
-					{e.n}
-					{e.currency} transaction{e.n === 1 ? '' : 's'} are not included in the PLN figures — no FX
-					conversion.
+					Not in the PLN figures above — the app does no FX conversion:
+					{#if e.holdings}<strong>{moneyIn(e.holdings, e.currency)}</strong> of holdings,{/if}
+					{#if e.cash}<strong>{moneyIn(e.cash, e.currency)}</strong> of brokerage cash,{/if}
+					{#if e.txns}{e.txns} {e.currency} bank transaction{e.txns === 1 ? '' : 's'},{/if}
+					{#if e.rate && e.holdings + e.cash}
+						together <strong>≈ {money((e.holdings + e.cash) * e.rate)}</strong> at the
+						{e.rate} you last converted at ({e.rateAt}) — for reading only, it is counted nowhere.
+					{:else}
+						all held and shown in {e.currency}.
+					{/if}
 				</p>
 			{/each}
 			{#if data.doubleCountRisk}

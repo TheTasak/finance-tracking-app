@@ -53,8 +53,9 @@ export const CATEGORIES = [
 ];
 
 /** Stable colours so a category keeps its slice colour between renders. */
-export const colorFor = (s: string) => {
+export const colorFor = (s: string, alpha = 1) => {
 	let h = 0;
 	for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360;
-	return `hsl(${h} 62% 55%)`;
+	// Comma syntax: Chart.js' colour parser doesn't read the `hsl(h s l / a)` slash form.
+	return `hsla(${h}, 62%, 55%, ${alpha})`;
 };

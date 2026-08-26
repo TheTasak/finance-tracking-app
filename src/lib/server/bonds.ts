@@ -95,7 +95,6 @@ export type Projection = {
 	months: string[];
 	perMonth: number[];
 	cumulative: number[];
-	perMonthNet: number[];
 	cumulativeNet: number[];
 	byBond: { id: number; label: string; data: number[] }[];
 };
@@ -119,7 +118,6 @@ export function project(bonds: Bond[]): Projection {
 		months,
 		perMonth,
 		cumulative,
-		perMonthNet: perMonth.map((v) => v * (1 - BELKA)),
 		cumulativeNet: cumulative.map((v) => v * (1 - BELKA)),
 		byBond: rows.map((r) => ({
 			id: r.b.id,

@@ -53,14 +53,12 @@ CREATE TABLE IF NOT EXISTS trade (
   name TEXT, isin TEXT,
   side TEXT,                     -- K = buy (kupno), S = sell (sprzedaż)
   qty REAL, price REAL,
-  value REAL,                    -- qty * price, before commission
   commission REAL,
   -- Cash actually moved ("po prowizji"). Buys add the commission, sells subtract it.
-  -- This, not value, is what the cost basis is built from — both files agree on it.
+  -- This is what the cost basis is built from — both files agree on it, where they
+  -- disagree by a cent on qty * price.
   net REAL,
   currency TEXT DEFAULT 'PLN',
-  ref TEXT,                      -- broker order number, when the export carries one
-  source TEXT DEFAULT 'hispw',   -- hispw | cash
   seq INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS trade_isin ON trade(isin);
@@ -112,9 +110,7 @@ for (const [table, col, def] of [
 	['holding', 'capitalize', 'INTEGER DEFAULT 1'],
 	['account', 'is_cash', 'INTEGER DEFAULT 0'],
 	['holding', 'source', "TEXT DEFAULT 'manual'"],
-	['holding', 'isin', 'TEXT'],
-	['trade', 'ref', 'TEXT'],
-	['trade', 'source', "TEXT DEFAULT 'hispw'"]
+	['holding', 'isin', 'TEXT']
 ] as const) {
 	const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
 	if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);

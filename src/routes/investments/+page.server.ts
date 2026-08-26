@@ -1,13 +1,18 @@
 import type { Actions, PageServerLoad } from './$types';
 import { fail } from '@sveltejs/kit';
 import { run } from '$lib/server/db';
-import { bondProjection, currentMonth, holdings, investmentTotals } from '$lib/server/stats';
+import {
+	bondProjection,
+	currentMonth,
+	excluded,
+	holdings,
+	investmentTotals
+} from '$lib/server/stats';
 import { BELKA, PERIODS } from '$lib/server/bonds';
 import {
 	KINDS,
 	cashBalances,
 	cashOps,
-	fxRates,
 	portfolioIncome,
 	positions,
 	tradeTotals,
@@ -27,7 +32,7 @@ export const load: PageServerLoad = ({ url }) => {
 		tradeTotals: tradeTotals(),
 		income: portfolioIncome(),
 		cash: cashBalances(),
-		fx: fxRates(),
+		excluded: excluded(),
 		kinds: KINDS,
 		// ponytail: whole history, no paging — a personal broker account is hundreds of
 		// rows, not millions. Add LIMIT/OFFSET like /transactions if it ever drags.

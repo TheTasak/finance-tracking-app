@@ -46,7 +46,9 @@ test('PLN totals exclude transfers and EUR', () => {
 	assert.ok(Math.abs(expenses - 15308.6) < 0.01, `expenses ${expenses}`);
 	assert.ok(Math.abs(savingsRate - 0.7269) < 0.001, `savings rate ${savingsRate}`);
 
-	assert.deepEqual(stats.excluded(), [{ currency: 'EUR', n: 2 }]);
+	assert.deepEqual(stats.excluded(), [
+		{ currency: 'EUR', txns: 2, holdings: 0, cash: 0, rate: 0, rateAt: '' }
+	]);
 });
 
 test('salary is categorised and the top spend category is real', () => {
@@ -72,6 +74,25 @@ test('net worth uses the bank Saldo and reacts to holdings', () => {
 	assert.equal(inv.pl, 200);
 	assert.ok(Math.abs(inv.plPct - 0.2) < 1e-9);
 	assert.ok(Math.abs(stats.netWorth().total - (before + 1200)) < 0.01);
+});
+
+test('the net worth series splits by source and carries balances forward', () => {
+	const { months, sources } = stats.netWorthSeries();
+	assert.ok(months.length > 1);
+	assert.deepEqual(months, [...months].sort(), 'months must be chronological');
+	assert.ok(sources.every((s) => s.values.length === months.length));
+
+	// The TEST stock above was bought in 2026-01 for 1000.
+	const i = months.indexOf('2026-01');
+	const own = sources.find((s) => s.label === 'Own holdings (at cost)')!;
+	assert.ok(i >= 0, 'the buy month is in the series');
+	assert.equal(own.values[i], 1000);
+	assert.equal(own.values.slice(0, i).filter(Boolean).length, 0, 'nothing before it was bought');
+
+	// Bank balances hold their last known value rather than dropping to zero on a gap.
+	assert.equal(sources.filter((s) => s.label.startsWith('PL')).length, 2);
+	const last = sources.reduce((t, s) => t + s.values.at(-1)!, 0);
+	assert.ok(Math.abs(last - 59337.78) < 0.01, `last month ${last}`);
 });
 
 // ── Bossa brokerage: fills (hisPW) and cash ledger (historia finansowa) ─────
@@ -165,7 +186,10 @@ test('the same ISIN on two markets keeps two cost bases', () => {
 	assert.equal(usd.soldQty, 1050);
 	assert.ok(Math.abs(pln.realized - (9122.02 + 1930.77 - 6663.46)) < 0.01);
 	assert.ok(usd.realized > 0);
-	assert.deepEqual(T.tradeTotals().unmatched, [], 'nothing sold without a purchase');
+	assert.ok(
+		!T.positions().some((p) => p.unmatchedQty),
+		'nothing sold without a purchase'
+	);
 });
 
 test('a tender offer closes the position it paid for', () => {
@@ -215,16 +239,33 @@ test('cash balance and net worth pick up the brokerage', () => {
 	const nw = stats.netWorth();
 	assert.ok(nw.parts.some((p) => p.label === 'Brokerage cash' && Math.abs(p.value - 38487.91) < 0.01));
 
-	// USD holdings must not be added to PLN at 1:1 — they come back separately.
+	// USD holdings must not be added to PLN at 1:1 — they are reported, never counted.
 	const inv = stats.investmentTotals();
-	assert.deepEqual(
-		inv.byCurrency.map((c) => c.currency),
-		['USD']
-	);
 	const plnHoldings = all<{ v: number }>(
 		`SELECT SUM(qty * buy_price) v FROM holding WHERE currency = 'PLN'`
 	)[0].v;
 	assert.ok(Math.abs(inv.cost - plnHoldings) < 0.01, 'PLN cost basis only');
+
+	// Every page reads the same gap off excluded(): holdings, broker cash and bank rows.
+	const gaps = stats.excluded();
+	assert.deepEqual(gaps.map((e) => e.currency), ['EUR', 'USD'], 'EUR bank rows still reported');
+	const usd = gaps.find((e) => e.currency === 'USD')!;
+	assert.equal(usd.txns, 0, 'no USD bank transactions');
+	assert.ok(Math.abs(usd.cash - 7614.08) < 0.01);
+	assert.ok(Math.abs(usd.rate - 4.0317) < 1e-9, 'the rate the user last converted at');
+	assert.equal(usd.rateAt, '2024-10-29');
+	const usdHoldings = all<{ v: number }>(
+		`SELECT SUM(qty * buy_price) v FROM holding WHERE currency = 'USD'`
+	)[0].v;
+	assert.ok(Math.abs(usd.holdings - usdHoldings) < 0.01, 'no price set, so value is cost');
+	// None of it reached net worth: every part is a PLN figure and they sum to the total.
+	assert.ok(usd.holdings + usd.cash > 0, 'there is USD to leave out');
+	const investments = nw.parts.find((p) => p.label === 'Investments')!;
+	assert.ok(Math.abs(investments.value - inv.value) < 0.01, 'PLN holdings only');
+	assert.ok(
+		Math.abs(nw.total - nw.parts.reduce((s, p) => s + p.value, 0)) < 1e-9,
+		'no hidden currency conversion in the total'
+	);
 });
 
 test('a sell with no purchase imported is flagged, not counted as pure profit', () => {
@@ -239,7 +280,9 @@ test('a sell with no purchase imported is flagged, not counted as pure profit', 
 	assert.equal(ghost.realized, 0, 'no cost basis means no P/L claim');
 	assert.equal(ghost.openQty, 0);
 	assert.deepEqual(
-		T.tradeTotals().unmatched.map((p) => p.isin),
+		T.positions()
+			.filter((p) => p.unmatchedQty)
+			.map((p) => p.isin),
 		['PLGHOST0001']
 	);
 	run(`DELETE FROM trade WHERE isin = 'PLGHOST0001'`);

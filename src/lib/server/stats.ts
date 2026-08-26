@@ -1,6 +1,6 @@
 import { all, get } from './db.ts';
 import { type Bond, interestTo, project, totalInterest, valueAt } from './bonds.ts';
-import { brokerCash } from './trades.ts';
+import { brokerCash, cashBalances, fxRates } from './trades.ts';
 
 /** Every income/expense figure is PLN-only and excludes own-account transfers. */
 const REAL = `transfer = 0 AND currency = 'PLN'`;
@@ -40,6 +40,15 @@ export function byCategory(p: Period) {
 		 FROM tx WHERE ${REAL} AND amount < 0 AND date BETWEEN :from AND :to
 		 GROUP BY category ORDER BY total DESC`,
 		p
+	);
+}
+
+/** Expenses per month per category, for the stacked bar on the dashboard. */
+export function monthlyByCategory() {
+	return all<{ month: string; category: string; total: number }>(
+		`SELECT substr(date,1,7) month, COALESCE(category,'Uncategorised') category, -SUM(amount) total
+		 FROM tx WHERE ${REAL} AND amount < 0
+		 GROUP BY month, category ORDER BY month, total DESC`
 	);
 }
 
@@ -131,24 +140,14 @@ export function bonds(): Bond[] {
 export const bondProjection = () => project(bonds());
 
 /**
- * PLN only. Brokerage imports bring in USD positions and the app does no FX, so
- * adding them at 1:1 would quietly inflate net worth — they come back under
- * `byCurrency` instead, for the UI to show beside the PLN figure.
+ * PLN only. Brokerage imports bring in USD positions and the app does no FX, so adding
+ * them at 1:1 would quietly inflate net worth. `excluded()` reports what is left out.
  */
 export function investmentTotals() {
-	const hs = holdings();
-	const sum = (list: typeof hs) => {
-		const cost = list.reduce((s, h) => s + h.cost, 0);
-		const value = list.reduce((s, h) => s + h.value, 0);
-		return { cost, value, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
-	};
-	const currencies = [...new Set(hs.map((h) => h.currency))];
-	return {
-		...sum(hs.filter((h) => h.currency === 'PLN')),
-		byCurrency: currencies
-			.filter((c) => c !== 'PLN')
-			.map((currency) => ({ currency, ...sum(hs.filter((h) => h.currency === currency)) }))
-	};
+	const hs = holdings().filter((h) => h.currency === 'PLN');
+	const cost = hs.reduce((s, h) => s + h.cost, 0);
+	const value = hs.reduce((s, h) => s + h.value, 0);
+	return { cost, value, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
 }
 
 export function netWorth() {
@@ -167,46 +166,115 @@ export function netWorth() {
 	return { parts, total: parts.reduce((s, p) => s + p.value, 0) };
 }
 
+/** Average-cost basis of the open broker positions at each month end, PLN only. */
+function stockCostByMonth() {
+	// ponytail: average cost, not FIFO — this only feeds a chart. Positions are held at
+	// cost throughout because there is no price history to value them with.
+	const pos = new Map<string, { qty: number; cost: number }>();
+	const out = new Map<string, number>();
+	for (const t of all<{ date: string; isin: string; side: string; qty: number; net: number }>(
+		`SELECT date, time, isin, side, qty, net FROM trade WHERE currency = 'PLN'
+		 ORDER BY date ASC, time ASC, seq ASC`
+	)) {
+		const p = pos.get(t.isin) ?? { qty: 0, cost: 0 };
+		if (t.side === 'K') {
+			p.qty += t.qty;
+			p.cost += t.net;
+		} else {
+			const avg = p.qty ? p.cost / p.qty : 0;
+			p.qty -= t.qty;
+			p.cost = Math.max(0, p.cost - avg * t.qty);
+		}
+		pos.set(t.isin, p);
+		out.set(t.date.slice(0, 7), [...pos.values()].reduce((s, x) => s + x.cost, 0));
+	}
+	return out;
+}
+
 /**
- * Net worth per month: end-of-month bank Saldo + manual snapshots, both carried
- * forward over months with no data so the line never dips to zero on a gap.
+ * Net worth per month, split by where the money sits: one series per bank and manual
+ * account, plus brokerage cash, broker stocks at cost and bonds accrued to that month.
+ * Point-in-time sources are carried forward over months with no data so nothing dips
+ * to zero on a gap.
  */
 export function netWorthSeries() {
 	const months = monthsCovered();
-	if (!months.length) return [];
 
-	const bank = all<{ iban: string; month: string; balance: number }>(
-		`SELECT account iban, substr(date,1,7) month, balance FROM tx t
-		 WHERE currency = 'PLN' AND rowid = (
+	const bank = all<{ label: string; month: string; balance: number }>(
+		`SELECT a.label, substr(t.date,1,7) month, t.balance FROM tx t
+		 JOIN account a ON a.iban = t.account
+		 WHERE t.currency = 'PLN' AND a.in_net_worth = 1 AND t.rowid = (
 			SELECT rowid FROM tx WHERE account = t.account AND substr(date,1,7) = substr(t.date,1,7)
 			ORDER BY date DESC, seq ASC LIMIT 1
-		 )
-		 AND account IN (SELECT iban FROM account WHERE in_net_worth = 1)`
+		 )`
 	);
-	const manual = all<{ id: number; month: string; value: number }>(
-		`SELECT s.account_id id, s.month, s.value FROM snapshot s
+	const manual = all<{ label: string; month: string; value: number }>(
+		`SELECT a.label, s.month, s.value FROM snapshot s
 		 JOIN account a ON a.id = s.account_id
 		 WHERE a.in_net_worth = 1 AND a.currency = 'PLN'`
 	);
+	const cash = all<{ month: string; total: number }>(
+		`SELECT substr(date,1,7) month, SUM(amount) total FROM cashop
+		 WHERE currency = 'PLN' GROUP BY month ORDER BY month`
+	);
 
-	const keys = [
-		...new Set([...bank.map((b) => 'b:' + b.iban), ...manual.map((m) => 'm:' + m.id)])
-	];
-	const at = new Map<string, number>();
-	for (const b of bank) at.set(`b:${b.iban}|${b.month}`, b.balance);
-	for (const m of manual) at.set(`m:${m.id}|${m.month}`, m.value);
+	const hs = holdings().filter((h) => h.currency === 'PLN');
+	const bondsHeld = hs.filter((h) => h.kind === 'bond');
+	const ownStocks = hs.filter((h) => h.kind !== 'bond' && h.source !== 'broker');
+	const stockCost = stockCostByMonth();
+	const boughtIn = (h: { buy_date: string }) => (h.buy_date ?? '').slice(0, 7);
 
-	// Manual snapshots can predate or postdate the transaction history.
-	const allMonths = [...new Set([...months, ...manual.map((m) => m.month)])].sort();
+	// Manual snapshots and holdings can predate or postdate the transaction history.
+	const allMonths = [
+		...new Set([
+			...months,
+			...manual.map((m) => m.month),
+			...cash.map((c) => c.month),
+			...stockCost.keys(),
+			...[...bondsHeld, ...ownStocks].map(boughtIn)
+		])
+	]
+		.filter(Boolean)
+		.sort();
+	if (!allMonths.length) return { months: [], sources: [] };
 
-	const last = new Map<string, number>();
-	return allMonths.map((month) => {
-		for (const k of keys) {
-			const v = at.get(`${k}|${month}`);
-			if (v !== undefined) last.set(k, v);
-		}
-		return { month, total: [...last.values()].reduce((s, v) => s + v, 0) };
+	const sparse = new Map<string, Map<string, number>>();
+	const point = (label: string, month: string, value: number) => {
+		let m = sparse.get(label);
+		if (!m) sparse.set(label, (m = new Map()));
+		m.set(month, value);
+	};
+	for (const b of bank) point(b.label, b.month, b.balance);
+	for (const m of manual) point(m.label, m.month, m.value);
+	// The broker's ledger has no balance column, so cash is a running sum over it.
+	let running = 0;
+	for (const c of cash) point('Brokerage cash', c.month, (running += c.total));
+	for (const [month, cost] of stockCost) point('Stocks (at cost)', month, cost);
+
+	const sources = [...sparse].map(([label, known]) => {
+		let last = 0;
+		return { label, values: allMonths.map((m) => (last = known.get(m) ?? last)) };
 	});
+
+	// A bond's worth in any month is arithmetic, so it needs no carry-forward.
+	const held = (list: typeof hs, at: (h: (typeof hs)[number], month: string) => number) => (month: string) =>
+		list.reduce((s, h) => (boughtIn(h) > month ? s : s + at(h, month)), 0);
+	if (bondsHeld.length)
+		sources.push({
+			label: 'Bonds',
+			values: allMonths.map(
+				held(bondsHeld, (h, month) =>
+					isBond(h) ? valueAt(h as unknown as Bond, month) : h.qty * h.buy_price
+				)
+			)
+		});
+	if (ownStocks.length)
+		sources.push({
+			label: 'Own holdings (at cost)',
+			values: allMonths.map(held(ownStocks, (h) => h.qty * h.buy_price))
+		});
+
+	return { months: allMonths, sources };
 }
 
 /**
@@ -259,9 +327,50 @@ export function projectionDefaults() {
 	};
 }
 
-/** Anything the PLN figures deliberately leave out, so the UI can say so. */
-export function excluded() {
-	return all<{ currency: string; n: number }>(
+export type Excluded = {
+	currency: string;
+	/** Bank rows in this currency, counted rather than summed — they carry no balance. */
+	txns: number;
+	holdings: number;
+	cash: number;
+	/** The rate the user last converted at, for reading only. 0 when unknown. */
+	rate: number;
+	rateAt: string;
+};
+
+/**
+ * Everything the PLN figures deliberately leave out, per currency, so every page tells
+ * the same story. The app does no FX: a USD position added at 1:1 would quietly inflate
+ * net worth, so it is reported here instead of being counted anywhere.
+ */
+export function excluded(): Excluded[] {
+	const rates = new Map(fxRates().map((f) => [f.pair.split('/')[1], f]));
+	const per = new Map<string, Excluded>();
+	const row = (currency: string) => {
+		let r = per.get(currency);
+		if (!r) {
+			const fx = rates.get(currency);
+			per.set(
+				currency,
+				(r = {
+					currency,
+					txns: 0,
+					holdings: 0,
+					cash: 0,
+					rate: fx?.rate ?? 0,
+					rateAt: fx?.date ?? ''
+				})
+			);
+		}
+		return r;
+	};
+
+	for (const t of all<{ currency: string; n: number }>(
 		`SELECT currency, COUNT(*) n FROM tx WHERE currency <> 'PLN' GROUP BY currency`
-	);
+	))
+		row(t.currency).txns = t.n;
+	for (const h of holdings()) if (h.currency !== 'PLN') row(h.currency).holdings += h.value;
+	for (const c of cashBalances()) if (c.currency !== 'PLN') row(c.currency).cash = c.balance;
+
+	return [...per.values()].sort((a, b) => a.currency.localeCompare(b.currency));
 }

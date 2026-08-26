@@ -25,6 +25,7 @@ export const load: PageServerLoad = ({ url }) => {
 		totals: stats.totals(p),
 		monthly: stats.monthly(),
 		byCategory: stats.byCategory(p),
+		monthlyByCategory: stats.monthlyByCategory(),
 		netWorth: stats.netWorth(),
 		netWorthSeries: stats.netWorthSeries(),
 		investments: stats.investmentTotals(),

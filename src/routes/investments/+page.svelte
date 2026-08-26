@@ -13,11 +13,6 @@
 	const pln = $derived(data.income.find((i) => i.currency === 'PLN'));
 	const brokerCash = $derived(data.cash.find((c) => c.currency === 'PLN'));
 
-	/** Only ever a label: the app converts nothing, it just refuses to leave USD unreadable. */
-	const inPln = (amount: number, currency: string) => {
-		const fx = data.fx.find((f) => f.pair.endsWith('/' + currency));
-		return fx ? `≈ ${money(amount * fx.rate)} at ${fx.rate} (${fx.date})` : '';
-	};
 
 	const bondTotals = $derived({
 		principal: bonds.reduce((s, b) => s + b.cost, 0),
@@ -148,20 +143,18 @@
 		{/if}
 	</div>
 
-	{#if data.totals.byCurrency.length}
+	{#each data.excluded.filter((e) => e.holdings || e.cash) as e (e.currency)}
 		<p class="warn" style="margin-top:1rem">
 			Not in the figures above — the app does no FX conversion:
-			{#each data.totals.byCurrency as c (c.currency)}
-				<strong>{moneyIn(c.value, c.currency)}</strong> of holdings
-				<span class="note">({inPln(c.value, c.currency)})</span>{' '}
-			{/each}
-			{#each data.cash.filter((c) => c.currency !== 'PLN') as c (c.currency)}
-				and <strong>{moneyIn(c.balance, c.currency)}</strong> of cash
-				<span class="note">({inPln(c.balance, c.currency)})</span>
-			{/each}
-			. The rate shown is the one you last converted at, for reading only.
+			{#if e.holdings}<strong>{moneyIn(e.holdings, e.currency)}</strong> of holdings{/if}
+			{#if e.holdings && e.cash}and{/if}
+			{#if e.cash}<strong>{moneyIn(e.cash, e.currency)}</strong> of cash{/if}.
+			{#if e.rate}
+				Together ≈ {money((e.holdings + e.cash) * e.rate)} at the {e.rate} you last converted
+				at ({e.rateAt}) — for reading only.
+			{/if}
 		</p>
-	{/if}
+	{/each}
 {/if}
 
 <!-- ── Stocks ───────────────────────────────────────────── -->

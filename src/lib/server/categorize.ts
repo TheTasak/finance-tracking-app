@@ -49,14 +49,14 @@ type Rule = { id: number; pattern: string; category: string };
 let cache: Rule[] | null = null;
 
 const rules = () => (cache ??= all<Rule>(`SELECT * FROM rule ORDER BY id`));
-export const invalidateRules = () => (cache = null);
+const invalidateRules = () => (cache = null);
 
 /**
  * Collapse a card description into something worth turning into a rule.
  * Millennium appends a settlement date, a city, a country code and a payment
  * reference to almost every card row — none of which identify the merchant.
  */
-export function merchantKey(description: string, counterparty: string, type = ''): string {
+function merchantKey(description: string, counterparty: string, type = ''): string {
 	const raw = (description || counterparty || type || '').trim();
 	let s = raw
 		.replace(/\s*\d{4}-\d{2}-\d{2}.*$/, '') // trailing settlement date
