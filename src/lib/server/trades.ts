@@ -301,6 +301,21 @@ export const cashOps = (kind = '') =>
 		kind ? { kind } : {}
 	);
 
+/**
+ * Every bond money movement, from both places they happen: the brokerage ledger
+ * (Catalyst coupons and redemptions) and the treasury registry account, whose
+ * dispositions treasury.ts writes to bond_op.
+ */
+export const bondOps = () =>
+	all<CashOp & { source: string }>(
+		`SELECT id, date, title, details, amount, currency, kind, symbol, seq, 'broker' source
+		   FROM cashop WHERE kind IN ('bond', 'coupon')
+		 UNION ALL
+		 SELECT id, date, title, details, amount, currency, kind, symbol, seq, 'registry' source
+		   FROM bond_op
+		 ORDER BY date DESC, seq ASC`
+	);
+
 // ── Positions ───────────────────────────────────────────────────────────────────
 
 export type Position = {

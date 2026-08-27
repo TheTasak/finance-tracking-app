@@ -1,9 +1,13 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { money } from '$lib/fmt';
+	import { money, moneyIn } from '$lib/fmt';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
+
+	/** PLN per unit, from the same stored rates the net-worth line converts with. */
+	const rateOf = (currency: string) =>
+		currency === 'PLN' ? 1 : (data.rates.find((r) => r.currency === currency)?.rate ?? 0);
 
 	const manual = $derived(data.accounts.filter((a: any) => a.kind === 'manual'));
 	const bank = $derived(data.accounts.filter((a: any) => a.kind === 'bank'));
@@ -29,7 +33,17 @@
 							<span class="note">{a.iban}</span>
 							<span class="num">
 								{#if data.latestBalance[a.iban]}
-									{money(data.latestBalance[a.iban].balance)}
+									<!-- A foreign account is stated in its own currency; PLN is the conversion. -->
+									{moneyIn(data.latestBalance[a.iban].balance, a.currency)}
+									{#if a.currency !== 'PLN'}
+										{#if rateOf(a.currency)}
+											<span class="note">
+												≈ {money(data.latestBalance[a.iban].balance * rateOf(a.currency))}
+											</span>
+										{:else}
+											<span class="warn">no {a.currency}/PLN rate stored</span>
+										{/if}
+									{/if}
 									<span class="note">{data.latestBalance[a.iban].date}</span>
 								{:else}—{/if}
 							</span>
@@ -112,7 +126,12 @@
 					<thead>
 						<tr>
 							<th>Month</th>
-							{#each manual as a (a.id)}<th class="num">{a.label}</th>{/each}
+							{#each manual as a (a.id)}
+								<th class="num">
+									{a.label}
+									{#if a.currency !== 'PLN'}<span class="note">{a.currency}</span>{/if}
+								</th>
+							{/each}
 						</tr>
 					</thead>
 					<tbody>

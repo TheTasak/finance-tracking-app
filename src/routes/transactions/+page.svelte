@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import Chart from '$lib/Chart.svelte';
-	import { colorFor, money, percent } from '$lib/fmt';
+	import { colorFor, money, moneyIn, percent } from '$lib/fmt';
 	import { CATEGORIES } from '$lib/fmt';
 	import type { PageData } from './$types';
 
@@ -213,8 +213,7 @@
 							<div class="note">{r.description}</div>
 						</td>
 						<td class="num" class:pos={r.amount > 0 && !r.transfer} class:neg={r.amount < 0 && !r.transfer}>
-							{money(r.amount)}
-							{#if r.currency !== 'PLN'}<span class="badge">{r.currency}</span>{/if}
+							{moneyIn(r.amount, r.currency)}
 						</td>
 						<td>
 							{#if r.transfer}

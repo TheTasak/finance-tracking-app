@@ -41,7 +41,7 @@
 			span: data.bonds,
 			unit: 'bond series',
 			accept: '.xls',
-			note: 'The “Historia dyspozycji” .xls, exactly as downloaded. Purchases of one series merge into a single holding. The export has no interest rate — type it in once per series on the portfolio page and it survives every re-import.'
+			note: 'The “Historia dyspozycji” .xls, exactly as downloaded. Purchases of one series merge into a single holding. The export has no interest rate — type it in once per series on the portfolio page and it survives every re-import. Each purchase is also kept as an operation, listed under Bonds on the portfolio page.'
 		}
 	]);
 </script>
@@ -87,6 +87,9 @@
 		<strong class="pos">{form.added} added</strong>, {form.skipped} already present
 		{#if 'fills' in form && form.fills}
 			<span class="note">· {form.fills} of them new fills</span>
+		{/if}
+		{#if 'ops' in form && form.ops}
+			<span class="note">· {form.ops} new operations</span>
 		{/if}
 		<span class="note">({form.name})</span>
 		<a href="/investments" class="note">· view portfolio</a>

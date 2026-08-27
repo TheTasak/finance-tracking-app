@@ -2,6 +2,7 @@ import type { Actions, PageServerLoad } from './$types';
 import { fail } from '@sveltejs/kit';
 import { all, db, run, tx } from '$lib/server/db';
 import { monthsCovered } from '$lib/server/stats';
+import { latestRates } from '$lib/server/prices';
 
 /** Months to show in the snapshot grid: everything with data, plus the 12 most recent. */
 function gridMonths(): string[] {
@@ -27,6 +28,7 @@ export const load: PageServerLoad = () => {
 		months,
 		values,
 		accounts: all(`SELECT * FROM account ORDER BY kind DESC, label`),
+		rates: latestRates(),
 		latestBalance: Object.fromEntries(
 			all<{ iban: string; balance: number; date: string }>(
 				`SELECT account iban, balance, date FROM tx t WHERE rowid = (

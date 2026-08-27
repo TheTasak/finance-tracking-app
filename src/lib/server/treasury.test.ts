@@ -11,6 +11,7 @@ const { readXls } = await import('./xls.ts');
 const { importTreasuryBonds, maturityOf, parseDyspozycje, toHoldings } = await import(
 	'./treasury.ts'
 );
+const { bondOps } = await import('./trades.ts');
 const { get, run } = await import('./db.ts');
 const { interestTo } = await import('./bonds.ts');
 
@@ -67,13 +68,13 @@ test('maturity is the coded month on the purchase day', () => {
 
 test('re-import updates in place and keeps the rate you typed', () => {
 	const buys = parseDyspozycje(readXls(XLS));
-	assert.deepEqual(importTreasuryBonds(buys), { added: 5, skipped: 0 });
+	assert.deepEqual(importTreasuryBonds(buys), { added: 5, skipped: 0, ops: 9 });
 
 	run(`UPDATE holding SET coupon_rate = 0.0595 WHERE isin = 'TOS0827'`);
 	// Same file again, plus a later lot in a series already held.
 	assert.deepEqual(
 		importTreasuryBonds([...buys, { code: 'TOS1128', date: '2025-11-20', qty: 50, amount: 5000 }]),
-		{ added: 0, skipped: 5 }
+		{ added: 0, skipped: 5, ops: 1 }
 	);
 
 	const held = get<any>(`SELECT * FROM holding WHERE isin = 'TOS0827'`)!;
@@ -84,4 +85,25 @@ test('re-import updates in place and keeps the rate you typed', () => {
 
 	// One year in, 220 bonds at 5.95% have earned their first annual credit.
 	assert.ok(Math.abs(interestTo(held, '2025-08') - 22000 * 0.0595) < 1e-9);
+});
+
+test('the dispositions survive the import, one row per lot', () => {
+	// Runs after the re-import test above: the same file twice, plus one extra lot.
+	const ops = bondOps().filter((o) => o.source === 'registry');
+	assert.equal(ops.length, 10, '9 purchases in the file, deduped, plus the extra TOS1128 lot');
+	assert.equal(
+		ops.reduce((s, o) => s + o.amount, 0),
+		-130000,
+		'money out: 125 000 from the file plus the 5 000 lot'
+	);
+
+	const march = ops.filter((o) => o.symbol === 'TOS0329');
+	assert.equal(march.length, 4, 'four lots stay four operations, not one merged holding');
+	assert.deepEqual(
+		march.map((o) => o.date).sort(),
+		['2026-03-13', '2026-03-27', '2026-03-30', '2026-03-30']
+	);
+	assert.ok(ops.every((o) => o.kind === 'bond' && o.currency === 'PLN'));
+	// Two lots landed on 2026-03-30: the occurrence counter has to keep both.
+	assert.equal(march.filter((o) => o.date === '2026-03-30').length, 2);
 });

@@ -89,6 +89,21 @@ CREATE TABLE IF NOT EXISTS cashop (
 );
 CREATE INDEX IF NOT EXISTS cashop_kind ON cashop(kind);
 
+-- Konto rejestrowe ("Historia dyspozycji"): what moved on the treasury-bond registry
+-- account. Same column shape as cashop so both render as one list, but deliberately a
+-- separate table: cash there is not brokerage cash, and every balance that sums cashop
+-- would be wrong if these rows were mixed in.
+CREATE TABLE IF NOT EXISTS bond_op (
+  id TEXT PRIMARY KEY,
+  date TEXT,
+  title TEXT, details TEXT,
+  amount REAL,                   -- signed: credits positive, debits negative
+  currency TEXT DEFAULT 'PLN',
+  kind TEXT,                     -- 'bond' — see KINDS in trades.ts
+  symbol TEXT,                   -- bond series, e.g. TOS0827
+  seq INTEGER DEFAULT 0
+);
+
 -- Daily closes, keyed by the market ticker (holding.symbol) rather than the ISIN: one
 -- listing can back several holdings, and the quote is a property of the listing.
 CREATE TABLE IF NOT EXISTS price (

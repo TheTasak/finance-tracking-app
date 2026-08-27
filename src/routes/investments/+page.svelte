@@ -30,7 +30,11 @@
 	// The whole ledger arrives; the picker filters it here so the bond tab can still see
 	// its own rows while the ledger is filtered to something else.
 	const ops = $derived(data.kind ? data.ops.filter((o) => o.kind === data.kind) : data.ops);
-	const bondOps = $derived(data.ops.filter((o) => o.kind === 'bond' || o.kind === 'coupon'));
+	// Both ledgers, for the operations table below.
+	const bondOps = $derived(data.bondOps);
+	// The flow chart takes purchases from the holdings themselves, so its payout series
+	// stays brokerage-only — a registry purchase would otherwise be counted twice.
+	const brokerBondOps = $derived(bondOps.filter((o) => o.source === 'broker'));
 
 	/** What each open holding has made: unrealised, plus anything banked on the same ISIN. */
 	const held = $derived(
@@ -197,7 +201,10 @@
 	 */
 	const bondFlow = $derived.by(() => {
 		const months = [
-			...new Set([...bonds.map((b) => month(b.buy_date)), ...bondOps.map((o) => month(o.date))])
+			...new Set([
+				...bonds.map((b) => month(b.buy_date)),
+				...brokerBondOps.map((o) => month(o.date))
+			])
 		]
 			.filter(Boolean)
 			.sort();
@@ -205,7 +212,12 @@
 		let run = 0;
 		const cumulative = months.map((_, i) => (run += bought[i]));
 		const paid = (kind: string) =>
-			bucket(months, bondOps.filter((o) => o.kind === kind), (o) => month(o.date), (o) => o.amount);
+			bucket(
+				months,
+				brokerBondOps.filter((o) => o.kind === kind),
+				(o) => month(o.date),
+				(o) => o.amount
+			);
 		return {
 			months,
 			config: {
@@ -837,12 +849,16 @@
 			<h2>Bond operations</h2>
 			<table>
 				<thead>
-					<tr><th>Date</th><th>Type</th><th>Operation</th><th class="num">Amount</th></tr>
+					<tr>
+					<th>Date</th><th>Account</th><th>Type</th><th>Operation</th>
+					<th class="num">Amount</th>
+				</tr>
 				</thead>
 				<tbody>
 					{#each bondOps as o (o.id)}
 						<tr>
 							<td>{o.date}</td>
+							<td><span class="badge">{o.source === 'registry' ? 'Konto rejestrowe' : 'Broker'}</span></td>
 							<td><span class="badge">{data.kinds[o.kind] ?? o.kind}</span></td>
 							<td>{o.title}{#if o.details}<div class="note">{o.details}</div>{/if}</td>
 							<td class="num" class:pos={o.amount >= 0} class:neg={o.amount < 0}>
@@ -854,7 +870,9 @@
 			</table>
 			<p class="note" style="margin-top:.5rem">
 				Subscriptions, oversubscription refunds, redemptions and coupons from the brokerage
-				ledger — {bondOps.length} operations.
+				ledger, plus purchases from the treasury registry account — {bondOps.length}
+				operations. Registry purchases arrive with the <em>Historia dyspozycji</em> export, so
+				re-import it on <a href="/import">Import</a> to pick up series bought before now.
 			</p>
 		</div>
 	{/if}
