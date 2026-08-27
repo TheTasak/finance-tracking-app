@@ -3,7 +3,13 @@ import { mkdirSync } from 'node:fs';
 
 mkdirSync('data', { recursive: true });
 
-export const db = new DatabaseSync('data/finance.db');
+/**
+ * The tests wipe whatever file this points at, so they set FINANCE_DB to their own copy.
+ * Without that they would delete your real ledger — they used to.
+ */
+export const DB_FILE = process.env.FINANCE_DB || 'data/finance.db';
+
+export const db = new DatabaseSync(DB_FILE);
 db.exec('PRAGMA journal_mode = WAL');
 
 db.exec(`
@@ -79,6 +85,13 @@ CREATE TABLE IF NOT EXISTS cashop (
 );
 CREATE INDEX IF NOT EXISTS cashop_kind ON cashop(kind);
 
+-- Daily closes, keyed by the market ticker (holding.symbol) rather than the ISIN: one
+-- listing can back several holdings, and the quote is a property of the listing.
+CREATE TABLE IF NOT EXISTS price (
+  symbol TEXT, date TEXT, close REAL,
+  PRIMARY KEY (symbol, date)
+);
+
 CREATE TABLE IF NOT EXISTS rule (
   id INTEGER PRIMARY KEY, pattern TEXT, category TEXT
 );
@@ -101,16 +114,28 @@ CREATE TABLE IF NOT EXISTS snapshot (
 );
 `);
 
+// The price feed moved from Stooq to Yahoo, so the column holds a Yahoo ticker now.
+// Renamed rather than re-added: the symbols are yours, only their spelling changed.
+{
+	const cols = db.prepare(`PRAGMA table_info(holding)`).all() as { name: string }[];
+	if (cols.some((c) => c.name === 'stooq') && !cols.some((c) => c.name === 'symbol'))
+		db.exec(`ALTER TABLE holding RENAME COLUMN stooq TO symbol`);
+}
+
 // SQLite has no ADD COLUMN IF NOT EXISTS, so bring older files up to date by hand.
 for (const [table, col, def] of [
 	['tx', 'seq', 'INTEGER DEFAULT 0'],
+	// Kept so the transfer flag stays a pure function of the row rather than a verdict
+	// frozen at import time — see recategorizeAll.
+	['tx', 'counter_iban', 'TEXT'],
 	['holding', 'coupon_rate', 'REAL'],
 	['holding', 'maturity', 'TEXT'],
 	['holding', 'compound_freq', 'TEXT'],
 	['holding', 'capitalize', 'INTEGER DEFAULT 1'],
 	['account', 'is_cash', 'INTEGER DEFAULT 0'],
 	['holding', 'source', "TEXT DEFAULT 'manual'"],
-	['holding', 'isin', 'TEXT']
+	['holding', 'isin', 'TEXT'],
+	['holding', 'symbol', 'TEXT']
 ] as const) {
 	const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
 	if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);

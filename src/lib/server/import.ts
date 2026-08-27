@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { db, ibanKey, ownIbans, tx } from './db.ts';
-import { applyRules } from './categorize.ts';
+import { TRANSFER, applyRules } from './categorize.ts';
 
 export type Row = {
 	id: string;
@@ -108,8 +108,8 @@ export function parseMillennium(text: string): Row[] {
 export function importRows(rows: Row[]) {
 	const ins = db.prepare(`
 		INSERT OR IGNORE INTO tx
-			(id, account, date, settled, type, counterparty, description, amount, currency, balance, category, transfer, seq)
-		VALUES (:id, :account, :date, :settled, :type, :counterparty, :description, :amount, :currency, :balance, :category, :transfer, :seq)
+			(id, account, date, settled, type, counterparty, description, amount, currency, balance, category, transfer, seq, counter_iban)
+		VALUES (:id, :account, :date, :settled, :type, :counterparty, :description, :amount, :currency, :balance, :category, :transfer, :seq, :counter_iban)
 	`);
 	const insAcc = db.prepare(
 		`INSERT OR IGNORE INTO account (iban, label, kind, currency) VALUES (:iban, :label, 'bank', :currency)`
@@ -129,7 +129,12 @@ export function importRows(rows: Row[]) {
 			// Only a counter-IBAN we own makes this an own-transfer. Do NOT trust
 			// "PRZELEW WEWNĘTRZNY" — Millennium uses it for any intra-bank transfer,
 			// including genuine income from another person's Millennium account.
-			const transfer = r.counterIban && own.has(r.counterIban) ? 1 : 0;
+			//
+			// A rule categorising the row as Transfer counts too: that is how an account of
+			// yours at another bank is recognised, since the export names it without an IBAN.
+			const category = applyRules(r.description, r.counterparty, r.type);
+			const transfer =
+				(r.counterIban && own.has(r.counterIban)) || category === TRANSFER ? 1 : 0;
 			added += Number(
 				ins.run({
 					id: r.id,
@@ -143,8 +148,9 @@ export function importRows(rows: Row[]) {
 					currency: r.currency,
 					balance: r.balance,
 					seq: r.seq,
+					counter_iban: r.counterIban,
 					transfer,
-					category: transfer ? 'Transfer' : applyRules(r.description, r.counterparty, r.type)
+					category: transfer ? TRANSFER : category
 				}).changes
 			);
 		}

@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, rmSync } from 'node:fs';
 
-// Fresh DB per run — db.ts opens data/finance.db at import time.
-rmSync('data/finance.db', { force: true });
-rmSync('data/finance.db-wal', { force: true });
-rmSync('data/finance.db-shm', { force: true });
+// Fresh DB per run, and never the real one: db.ts opens FINANCE_DB at import time, so
+// this has to be set before the first `await import` below.
+process.env.FINANCE_DB = 'data/test.db';
+rmSync('data/test.db', { force: true });
+rmSync('data/test.db-wal', { force: true });
+rmSync('data/test.db-shm', { force: true });
 
 const { parseMillennium, importRows } = await import('./import.ts');
 const { all, get, run } = await import('./db.ts');
@@ -47,7 +49,7 @@ test('PLN totals exclude transfers and EUR', () => {
 	assert.ok(Math.abs(savingsRate - 0.7269) < 0.001, `savings rate ${savingsRate}`);
 
 	assert.deepEqual(stats.excluded(), [
-		{ currency: 'EUR', txns: 2, holdings: 0, cash: 0, rate: 0, rateAt: '' }
+		{ currency: 'EUR', txns: 2, holdings: 0, cash: 0, rate: 0, rateAt: '', rateSource: '' }
 	]);
 });
 
@@ -84,7 +86,7 @@ test('the net worth series splits by source and carries balances forward', () =>
 
 	// The TEST stock above was bought in 2026-01 for 1000.
 	const i = months.indexOf('2026-01');
-	const own = sources.find((s) => s.label === 'Own holdings (at cost)')!;
+	const own = sources.find((s) => s.label === 'Own holdings')!;
 	assert.ok(i >= 0, 'the buy month is in the series');
 	assert.equal(own.values[i], 1000);
 	assert.equal(own.values.slice(0, i).filter(Boolean).length, 0, 'nothing before it was bought');
@@ -321,4 +323,205 @@ test('open positions become priceable holdings and survive a re-import', () => {
 	T.syncBrokerHoldings();
 	assert.equal(get(`SELECT 1 FROM holding WHERE isin = 'CA2926717083'`), undefined);
 	assert.ok(get(`SELECT 1 FROM holding WHERE isin = 'PLXTRDM00011'`), 'PLN sleeve untouched');
+});
+
+// ── Prices ─────────────────────────────────────────────────────────────────
+
+const P = await import('./prices.ts');
+
+/** One Yahoo chart result: parallel timestamp/close arrays, opens in exchange time. */
+const chart = (stamps: number[], closes: (number | null)[], gmtoffset = 7200) => ({
+	timestamp: stamps,
+	meta: { currency: 'PLN', gmtoffset },
+	indicators: { quote: [{ close: closes }] }
+});
+
+// 2026-01-02 07:00 UTC = 09:00 on the Warsaw open.
+const JAN2 = Date.UTC(2026, 0, 2, 7) / 1000;
+const DAY = 86400;
+
+test('zips Yahoo timestamps and closes, dropping sessions that did not trade', () => {
+	assert.deepEqual(P.closes(chart([JAN2, JAN2 + DAY, JAN2 + 2 * DAY], [182.4, null, 184.75])), [
+		{ date: '2026-01-02', close: 182.4 },
+		{ date: '2026-01-04', close: 184.75 }
+	]);
+	// Oldest first whatever order it arrives in — refreshPrices reads the last row.
+	assert.deepEqual(
+		P.closes(chart([JAN2 + DAY, JAN2], [9, 4])).map((r) => r.date),
+		['2026-01-02', '2026-01-03']
+	);
+});
+
+test('dates a close by the exchange it traded on, not UTC', () => {
+	// 23:30 UTC on the 1st is already the 2nd in Tokyo (+9). Read as UTC it would be
+	// filed a day early, and every month boundary would drift with it.
+	const late = Date.UTC(2026, 0, 1, 23, 30) / 1000;
+	assert.equal(P.closes(chart([late], [100], 9 * 3600))[0].date, '2026-01-02');
+	assert.equal(P.closes(chart([late], [100], 0))[0].date, '2026-01-01');
+});
+
+test('a halted or empty series yields no rows rather than zeroes', () => {
+	assert.deepEqual(P.closes(chart([JAN2, JAN2 + DAY], [null, 0])), []);
+	assert.deepEqual(P.closes(chart([], [])), []);
+});
+
+test('month-end closes take the last session in each month', () => {
+	run(`DELETE FROM price`);
+	for (const [date, close] of [
+		['2026-01-02', 100],
+		['2026-01-30', 110], // month end for January
+		['2026-02-27', 120]
+	] as const)
+		run(`INSERT INTO price (symbol, date, close) VALUES ('CDR.WA', :date, :close)`, { date, close });
+
+	const closes = P.monthEndCloses();
+	assert.deepEqual([...closes.get('CDR.WA')!], [
+		['2026-01', 110],
+		['2026-02', 120]
+	]);
+});
+
+test('the net worth chart prices broker stocks at their month close', () => {
+	run(`DELETE FROM price`);
+	const isin = 'PLXTRDM00011';
+	run(`UPDATE holding SET symbol = 'XTB.WA' WHERE isin = :isin`, { isin });
+	const qty = get<{ qty: number }>(`SELECT qty FROM holding WHERE isin = :isin`, { isin })!.qty;
+
+	const at = (label: string, month: string) => {
+		const { months, sources } = stats.netWorthSeries();
+		const s = sources.find((x) => x.label === label)!;
+		return s.values[months.indexOf(month)];
+	};
+	const month = stats.currentMonth();
+	const atCost = at('Stocks', month);
+
+	// One absurd close, so the series can only match if it really was used.
+	run(`INSERT INTO price (symbol, date, close) VALUES ('XTB.WA', :date, 1000)`, {
+		date: `${month}-15`
+	});
+	const atMarket = at('Stocks', month);
+	assert.notEqual(atMarket, atCost, 'the close must move the line');
+	// Only XTB was re-priced, so the line must clear what XTB alone is now worth while
+	// every other position still sits at cost.
+	assert.ok(atMarket > qty * 1000, `XTB alone is worth ${qty * 1000}, series says ${atMarket}`);
+
+	run(`DELETE FROM price`);
+	run(`UPDATE holding SET symbol = NULL WHERE isin = :isin`, { isin });
+});
+
+// ── Own accounts at another bank ───────────────────────────────────────────
+
+const C = await import('./categorize.ts');
+
+test('a Transfer rule takes money to your own account elsewhere out of spending', () => {
+	const row = {
+		id: 'pkobp-1',
+		account: 'PL43 1160 2202 0000 0003 8734 9839',
+		date: '2026-04-02',
+		settled: '2026-04-02',
+		type: 'Przelew krajowy',
+		counterparty: 'Konto Rejestrowe PKOBP',
+		description: 'Przelew krajowy - Konto Rejestrowe PKOBP',
+		amount: -22000,
+		currency: 'PLN',
+		balance: 0,
+		// The whole point: the export names the account but gives no IBAN to match.
+		counterIban: '',
+		seq: 0
+	};
+	const spentBefore = stats.totals(stats.ALL_TIME).expenses;
+	importRows([row]);
+
+	const saved = get<{ transfer: number; category: string }>(
+		`SELECT transfer, category FROM tx WHERE id = 'pkobp-1'`
+	)!;
+	assert.deepEqual(saved, { transfer: 1, category: 'Transfer' });
+	assert.equal(stats.totals(stats.ALL_TIME).expenses, spentBefore, 'never counted as spending');
+});
+
+test('deleting the rule puts it back — the flag is derived, not frozen', () => {
+	const id = get<{ id: number }>(`SELECT id FROM rule WHERE pattern = 'Konto Rejestrowe PKOBP'`)!.id;
+	run(`DELETE FROM rule WHERE id = :id`, { id });
+	C.recategorizeAll();
+	assert.equal(get<{ transfer: number }>(`SELECT transfer FROM tx WHERE id = 'pkobp-1'`)!.transfer, 0);
+
+	run(`INSERT INTO rule (pattern, category) VALUES ('Konto Rejestrowe PKOBP', 'Transfer')`);
+	C.recategorizeAll();
+	assert.equal(get<{ transfer: number }>(`SELECT transfer FROM tx WHERE id = 'pkobp-1'`)!.transfer, 1);
+});
+
+test('recategorising still recognises own-IBAN transfers', () => {
+	// The 3 outgoing legs between the two Millennium accounts, flagged by IBAN alone.
+	C.recategorizeAll();
+	const t = all<{ amount: number }>(
+		`SELECT amount FROM tx WHERE transfer = 1 AND counter_iban <> '' AND amount < 0`
+	);
+	assert.equal(t.reduce((s, r) => s + r.amount, 0), -35000);
+});
+
+test('a downsampled series is refused rather than stored as daily closes', async () => {
+	// Yahoo answers `range=max` with monthly bars dated the 1st. Storing those would put a
+	// month's OPENING price where monthEndCloses expects its close.
+	const monthly = {
+		chart: {
+			result: [
+				{
+					timestamp: [JAN2],
+					meta: { currency: 'PLN', gmtoffset: 7200, dataGranularity: '1mo' },
+					indicators: { quote: [{ close: [182.4] }] }
+				}
+			]
+		}
+	};
+	const real = globalThis.fetch;
+	globalThis.fetch = async () => new Response(JSON.stringify(monthly), { status: 200 });
+	try {
+		await assert.rejects(() => P.history('CDR.WA'), /1mo bars/);
+	} finally {
+		globalThis.fetch = real;
+	}
+});
+
+test('exchange rates are pulled per foreign currency and read back as PLN per unit', () => {
+	// USD from the brokerage ledger and holdings, EUR from the two bank rows.
+	assert.deepEqual(P.foreignCurrencies(), ['EUR', 'USD']);
+	assert.equal(P.fxSymbol('usd'), 'USDPLN=X');
+
+	run(`DELETE FROM price`);
+	for (const [symbol, date, close] of [
+		['USDPLN=X', '2026-08-26', 3.71],
+		['USDPLN=X', '2026-08-27', 3.7204],
+		['EURPLN=X', '2026-08-27', 4.3315]
+	] as const)
+		run(`INSERT INTO price (symbol, date, close) VALUES (:symbol, :date, :close)`, {
+			symbol,
+			date,
+			close
+		});
+
+	assert.deepEqual(P.latestRates(), [
+		{ currency: 'EUR', rate: 4.3315, date: '2026-08-27' },
+		{ currency: 'USD', rate: 3.7204, date: '2026-08-27' }
+	]);
+
+	// The market rate wins over the rate the user last converted at, and says so.
+	const usd = stats.excluded().find((e) => e.currency === 'USD')!;
+	assert.equal(usd.rate, 3.7204);
+	assert.equal(usd.rateSource, 'market');
+	run(`DELETE FROM price`);
+	assert.equal(stats.excluded().find((e) => e.currency === 'USD')!.rateSource, 'own');
+});
+
+test('a rate is never mistaken for a holding price', () => {
+	// FX symbols share the price table with equities, so the equity queries must not see
+	// them: a 3.72 "close" landing on a holding would be catastrophic and silent.
+	run(`DELETE FROM price`);
+	run(`INSERT INTO price (symbol, date, close) VALUES ('USDPLN=X', '2026-08-27', 3.7204)`);
+	assert.equal(P.monthEndCloses().has('USDPLN=X'), true, 'stored like any other series');
+	assert.equal(
+		all(`SELECT 1 FROM holding WHERE symbol LIKE '%PLN=X'`).length,
+		0,
+		'no holding is ever tagged with an FX pair'
+	);
+	run(`DELETE FROM price`);
 });

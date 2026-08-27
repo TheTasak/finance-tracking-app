@@ -150,8 +150,10 @@
 			{#if e.holdings && e.cash}and{/if}
 			{#if e.cash}<strong>{moneyIn(e.cash, e.currency)}</strong> of cash{/if}.
 			{#if e.rate}
-				Together ≈ {money((e.holdings + e.cash) * e.rate)} at the {e.rate} you last converted
-				at ({e.rateAt}) — for reading only.
+				Together ≈ {money((e.holdings + e.cash) * e.rate)} at {e.currency}/PLN
+				{e.rate.toFixed(4)}
+				{#if e.rateSource === 'market'}(Yahoo, {e.rateAt}){:else}(the rate you last converted at,
+					{e.rateAt}){/if} — for reading only.
 			{/if}
 		</p>
 	{/each}
@@ -159,12 +161,39 @@
 
 <!-- ── Stocks ───────────────────────────────────────────── -->
 <div class="panel scroll" style="margin-top:1rem">
-	<h2>Stocks</h2>
+	<div class="row" style="justify-content:space-between;align-items:baseline">
+		<h2>Stocks</h2>
+		{#if stocks.some((h) => h.symbol)}
+			<form method="POST" action="?/refreshPrices" use:enhance>
+				<button type="submit">Refresh prices</button>
+			</form>
+		{/if}
+	</div>
+	{#if data.rates.length}
+		<p class="note" style="margin:.25rem 0 .75rem">
+			{#each data.rates as r, i (r.currency)}{i ? ' · ' : ''}<strong
+					>1 {r.currency} = {r.rate.toFixed(4)} PLN</strong
+				>
+				({r.date}){/each}
+			— Yahoo, refreshed together with the prices.
+		</p>
+	{/if}
+	{#if form?.refreshed}
+		<ul class="note" style="margin:.25rem 0 .75rem">
+			{#each form.refreshed as r (r.symbol)}
+				<li class:neg={!!r.error}>
+					<strong>{r.symbol}</strong>
+					{#if r.error}— {r.error}{:else}{r.close} · {r.rows} day{r.rows === 1 ? '' : 's'} stored{/if}
+				</li>
+			{/each}
+		</ul>
+	{/if}
 	{#if stocks.length}
 		<table>
 			<thead>
 				<tr>
 					<th>Ticker</th><th>Name</th><th class="num">Qty</th><th class="num">Buy price</th>
+					<th>Ticker (Yahoo)</th>
 					<th class="num">Current price</th><th class="num">Value</th><th class="num">P/L</th><th></th>
 				</tr>
 			</thead>
@@ -178,6 +207,19 @@
 						<td>{h.name}<div class="note">bought {h.buy_date || '—'}</div></td>
 						<td class="num">{h.qty}</td>
 						<td class="num">{priceIn(h.buy_price, h.currency)}</td>
+						<td>
+							<form method="POST" action="?/setSymbol" class="row" use:enhance>
+								<input type="hidden" name="id" value={h.id} />
+								<input
+									name="symbol"
+									value={h.symbol ?? ''}
+									placeholder="CDR.WA"
+									style="width:6.5rem"
+									aria-label="Yahoo ticker for {h.ticker}"
+								/>
+								<button type="submit">Save</button>
+							</form>
+						</td>
 						<td class="num">
 							<form method="POST" action="?/setPrice" class="row" use:enhance>
 								<input type="hidden" name="id" value={h.id} />
@@ -211,6 +253,14 @@
 				rebuilds them, so edit them at the broker, not here. The price is still yours to type.
 			</p>
 		{/if}
+		<p class="note" style="margin-top:.5rem">
+			Put a holding's <a href="https://finance.yahoo.com/" target="_blank" rel="noreferrer">Yahoo
+			Finance</a> ticker in the <strong>Ticker</strong> column — <code>CDR.WA</code> for CD Projekt
+			on the GPW, <code>VUAA.L</code> in London, <code>AAPL</code> in New York — and
+			<em>Refresh prices</em> fills the price and stores the daily history behind the net-worth
+			chart. Leave it blank to keep typing the price yourself. A listing quoted in a different
+			currency than you hold is refused rather than converted: this app does no FX.
+		</p>
 	{:else}
 		<p class="note">No stocks yet.</p>
 	{/if}

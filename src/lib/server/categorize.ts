@@ -1,9 +1,20 @@
-import { all, db, get, run, tx } from './db.ts';
+import { all, db, get, ownIbans, run, tx } from './db.ts';
 
 export const UNCATEGORISED = 'Uncategorised';
 
+/**
+ * A rule with this category means "this is my own money moving", not spending. It is
+ * how an account of yours at another bank gets recognised: the export names it but
+ * carries no IBAN we could match, so the name is the only handle there is.
+ */
+export const TRANSFER = 'Transfer';
+
 /** Seeded from the merchants actually present in the Millennium export. First match wins. */
 const SEED: [string, string][] = [
+	// Accounts of yours at other institutions: the PKO BP registry account holding the
+	// bonds, and the Bossa brokerage account. Money sent there is still yours.
+	['Konto Rejestrowe PKOBP', TRANSFER],
+	['Konto Maklerskie', TRANSFER],
 	['TUTLO', 'Salary'],
 	['KAPITALIZACJA', 'Interest'],
 	['Odsetki premiowe', 'Interest'],
@@ -31,7 +42,7 @@ const SEED: [string, string][] = [
 	['KFC', 'Eating out'],
 	['KOFEINA', 'Eating out'],
 	['WILD ROOTS', 'Eating out'],
-	['Bezpieczna Przestrzen', 'Eating out'],
+	['Bezpieczna Przestrzen', 'Health'],
 	['APARTHOTEL', 'Travel'],
 	['BOOKING', 'Travel']
 ];
@@ -116,17 +127,37 @@ export function uncategorisedMerchants(limit = 25) {
 	};
 }
 
-/** Re-runs every rule over stored rows. Manual edits are lost by design — rules are the source of truth. */
+/**
+ * Re-runs every rule over stored rows. Manual edits are lost by design — rules are the
+ * source of truth.
+ *
+ * The transfer flag is recomputed here too, from the two things that can make a row your
+ * own money moving: a counter-account you own, or a rule of yours that says so. Deriving
+ * it rather than trusting the stored value is what lets a `Transfer` rule be *undone* —
+ * delete the rule and the row goes back to being spending.
+ */
 export function recategorizeAll() {
 	invalidateRules();
-	const rows = all<{ id: string; description: string; counterparty: string; type: string }>(
-		`SELECT id, description, counterparty, type FROM tx WHERE transfer = 0`
-	);
-	const upd = db.prepare(`UPDATE tx SET category = :category WHERE id = :id`);
+	const own = ownIbans();
+	const rows = all<{
+		id: string;
+		description: string;
+		counterparty: string;
+		type: string;
+		counter_iban: string | null;
+		transfer: number;
+	}>(`SELECT id, description, counterparty, type, counter_iban, transfer FROM tx`);
+
+	const upd = db.prepare(`UPDATE tx SET category = :category, transfer = :transfer WHERE id = :id`);
 	tx(() => {
-		for (const r of rows)
-			upd.run({ id: r.id, category: applyRules(r.description, r.counterparty, r.type) });
+		for (const r of rows) {
+			const category = applyRules(r.description, r.counterparty, r.type);
+			// Rows imported before counter_iban was stored have no IBAN to re-check, so they
+			// keep the verdict they were given; everything else is derived fresh.
+			const byIban = r.counter_iban === null ? r.transfer : own.has(r.counter_iban) ? 1 : 0;
+			const transfer = byIban || category === TRANSFER ? 1 : 0;
+			upd.run({ id: r.id, transfer, category: transfer ? TRANSFER : category });
+		}
 	});
-	run(`UPDATE tx SET category = 'Transfer' WHERE transfer = 1`);
 	return rows.length;
 }

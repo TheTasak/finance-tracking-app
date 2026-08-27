@@ -1,6 +1,7 @@
 import { all, get } from './db.ts';
 import { type Bond, interestTo, project, totalInterest, valueAt } from './bonds.ts';
 import { brokerCash, cashBalances, fxRates } from './trades.ts';
+import { latestRates, monthEndCloses } from './prices.ts';
 
 /** Every income/expense figure is PLN-only and excludes own-account transfers. */
 const REAL = `transfer = 0 AND currency = 'PLN'`;
@@ -100,6 +101,8 @@ export type Holding = {
 	/** 'broker' rows are derived from the trade table; 'manual' ones were typed in. */
 	source: string;
 	isin: string | null;
+	/** Yahoo ticker to price this holding from, e.g. 'CDR.WA' or 'AAPL'. Blank = untracked. */
+	symbol: string | null;
 };
 
 /** A bond is only projectable once it has a rate, a maturity and a frequency. */
@@ -166,12 +169,18 @@ export function netWorth() {
 	return { parts, total: parts.reduce((s, p) => s + p.value, 0) };
 }
 
-/** Average-cost basis of the open broker positions at each month end, PLN only. */
-function stockCostByMonth() {
-	// ponytail: average cost, not FIFO — this only feeds a chart. Positions are held at
-	// cost throughout because there is no price history to value them with.
-	const pos = new Map<string, { qty: number; cost: number }>();
-	const out = new Map<string, number>();
+type Lots = Map<string, { qty: number; cost: number }>;
+
+/**
+ * The open broker position per ISIN after every month that traded, PLN only. Months
+ * without a trade are absent: the position is unchanged, but its market value is not,
+ * so the caller carries the lots forward and re-prices them.
+ */
+function stockLotsByMonth(): Map<string, Lots> {
+	// ponytail: average cost, not FIFO — this only feeds a chart, and cost is just the
+	// fallback for months with no close.
+	const pos: Lots = new Map();
+	const out = new Map<string, Lots>();
 	for (const t of all<{ date: string; isin: string; side: string; qty: number; net: number }>(
 		`SELECT date, time, isin, side, qty, net FROM trade WHERE currency = 'PLN'
 		 ORDER BY date ASC, time ASC, seq ASC`
@@ -186,14 +195,16 @@ function stockCostByMonth() {
 			p.cost = Math.max(0, p.cost - avg * t.qty);
 		}
 		pos.set(t.isin, p);
-		out.set(t.date.slice(0, 7), [...pos.values()].reduce((s, x) => s + x.cost, 0));
+		// Snapshot, not a reference — `pos` keeps mutating as the walk goes on.
+		out.set(t.date.slice(0, 7), new Map([...pos].map(([k, v]) => [k, { ...v }])));
 	}
 	return out;
 }
 
 /**
  * Net worth per month, split by where the money sits: one series per bank and manual
- * account, plus brokerage cash, broker stocks at cost and bonds accrued to that month.
+ * account, plus brokerage cash, stocks at their market close for that month (cost where
+ * there is no close) and bonds accrued to it.
  * Point-in-time sources are carried forward over months with no data so nothing dips
  * to zero on a gap.
  */
@@ -221,8 +232,20 @@ export function netWorthSeries() {
 	const hs = holdings().filter((h) => h.currency === 'PLN');
 	const bondsHeld = hs.filter((h) => h.kind === 'bond');
 	const ownStocks = hs.filter((h) => h.kind !== 'bond' && h.source !== 'broker');
-	const stockCost = stockCostByMonth();
+	const stockLots = stockLotsByMonth();
 	const boughtIn = (h: { buy_date: string }) => (h.buy_date ?? '').slice(0, 7);
+
+	// Closes, and the ticker each holding was tagged with. A position closed long ago has
+	// no holding row left to carry a ticker, so it falls back to cost — as does any month
+	// with no close.
+	const closes = monthEndCloses();
+	const symbolOf = new Map(
+		all<{ isin: string; symbol: string }>(
+			`SELECT isin, symbol FROM holding WHERE isin <> '' AND symbol IS NOT NULL AND symbol <> ''`
+		).map((r) => [r.isin, r.symbol])
+	);
+	const closeAt = (symbol: string | undefined, month: string) =>
+		symbol ? closes.get(symbol)?.get(month) : undefined;
 
 	// Manual snapshots and holdings can predate or postdate the transaction history.
 	const allMonths = [
@@ -230,7 +253,7 @@ export function netWorthSeries() {
 			...months,
 			...manual.map((m) => m.month),
 			...cash.map((c) => c.month),
-			...stockCost.keys(),
+			...stockLots.keys(),
 			...[...bondsHeld, ...ownStocks].map(boughtIn)
 		])
 	]
@@ -249,7 +272,20 @@ export function netWorthSeries() {
 	// The broker's ledger has no balance column, so cash is a running sum over it.
 	let running = 0;
 	for (const c of cash) point('Brokerage cash', c.month, (running += c.total));
-	for (const [month, cost] of stockCost) point('Stocks (at cost)', month, cost);
+	// Broker stocks are re-priced every month, not just the ones that traded, so the
+	// line moves with the market between trades. Lots carry forward; prices do not.
+	let lots: Lots = new Map();
+	for (const month of allMonths) {
+		lots = stockLots.get(month) ?? lots;
+		if (!lots.size) continue;
+		let value = 0;
+		for (const [isin, p] of lots) {
+			if (p.qty <= 1e-9) continue;
+			const close = closeAt(symbolOf.get(isin), month);
+			value += close === undefined ? p.cost : p.qty * close;
+		}
+		point('Stocks', month, value);
+	}
 
 	const sources = [...sparse].map(([label, known]) => {
 		let last = 0;
@@ -270,8 +306,10 @@ export function netWorthSeries() {
 		});
 	if (ownStocks.length)
 		sources.push({
-			label: 'Own holdings (at cost)',
-			values: allMonths.map(held(ownStocks, (h) => h.qty * h.buy_price))
+			label: 'Own holdings',
+			values: allMonths.map(
+				held(ownStocks, (h, month) => h.qty * (closeAt(h.symbol ?? undefined, month) ?? h.buy_price))
+			)
 		});
 
 	return { months: allMonths, sources };
@@ -333,9 +371,11 @@ export type Excluded = {
 	txns: number;
 	holdings: number;
 	cash: number;
-	/** The rate the user last converted at, for reading only. 0 when unknown. */
+	/** What one unit is worth in PLN, for reading only. 0 when unknown. */
 	rate: number;
 	rateAt: string;
+	/** 'market' = today's Yahoo rate; 'own' = the rate you last converted at yourself. */
+	rateSource: 'market' | 'own' | '';
 };
 
 /**
@@ -344,12 +384,17 @@ export type Excluded = {
  * net worth, so it is reported here instead of being counted anywhere.
  */
 export function excluded(): Excluded[] {
-	const rates = new Map(fxRates().map((f) => [f.pair.split('/')[1], f]));
+	// The market rate when we have one, otherwise the rate the user themself converted at.
+	// Both are for reading only — no total on this page is ever FX-converted.
+	const own = new Map(fxRates().map((f) => [f.pair.split('/')[1], f]));
+	const market = new Map(latestRates().map((r) => [r.currency, r]));
 	const per = new Map<string, Excluded>();
 	const row = (currency: string) => {
 		let r = per.get(currency);
 		if (!r) {
-			const fx = rates.get(currency);
+			const live = market.get(currency);
+			const mine = own.get(currency);
+			const fx = live ?? mine;
 			per.set(
 				currency,
 				(r = {
@@ -358,7 +403,8 @@ export function excluded(): Excluded[] {
 					holdings: 0,
 					cash: 0,
 					rate: fx?.rate ?? 0,
-					rateAt: fx?.date ?? ''
+					rateAt: fx?.date ?? '',
+					rateSource: live ? 'market' : mine ? 'own' : ''
 				})
 			);
 		}

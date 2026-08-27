@@ -18,6 +18,7 @@ import {
 	tradeTotals,
 	trades
 } from '$lib/server/trades';
+import { latestRates, refreshPrices } from '$lib/server/prices';
 
 export const load: PageServerLoad = ({ url }) => {
 	const isin = url.searchParams.get('isin') || '';
@@ -33,6 +34,7 @@ export const load: PageServerLoad = ({ url }) => {
 		income: portfolioIncome(),
 		cash: cashBalances(),
 		excluded: excluded(),
+		rates: latestRates(),
 		kinds: KINDS,
 		// ponytail: whole history, no paging — a personal broker account is hundreds of
 		// rows, not millions. Add LIMIT/OFFSET like /transactions if it ever drags.
@@ -120,6 +122,27 @@ export const actions: Actions = {
 			at: new Date().toISOString().slice(0, 10)
 		});
 		return { ok: true };
+	},
+
+	/** Tag a holding with the Yahoo ticker its price comes from. Blank stops tracking it. */
+	setSymbol: async ({ request }) => {
+		const f = await request.formData();
+		// Yahoo tickers are uppercase with an optional exchange suffix: 'CDR.WA', 'AAPL'.
+		const symbol = str(f.get('symbol')).toUpperCase();
+		if (symbol && !/^[A-Z0-9^.=-]{1,20}$/.test(symbol))
+			return fail(400, { error: 'That does not look like a Yahoo ticker.' });
+		run(`UPDATE holding SET symbol = :symbol WHERE id = :id`, {
+			id: Number(f.get('id')),
+			symbol: symbol || null
+		});
+		return { ok: true };
+	},
+
+	refreshPrices: async () => {
+		const results = await refreshPrices();
+		if (!results.length)
+			return fail(400, { error: 'No holding has a Yahoo ticker yet — set one first.' });
+		return { ok: true, refreshed: results };
 	},
 
 	remove: async ({ request }) => {
