@@ -1,6 +1,14 @@
 <script lang="ts">
 	import Chart from '$lib/Chart.svelte';
-	import { money, moneyIn, percent, signed, colorFor } from '$lib/fmt';
+	import { money, moneyIn, percent, signed } from '$lib/fmt';
+	import {
+		colorFor,
+		grid,
+		incomeExpenseBars,
+		legend,
+		spendingDoughnut,
+		ticks
+	} from '$lib/charts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -11,45 +19,9 @@
 		['all', 'All time']
 	];
 
-	const grid = { color: '#262b36' };
-	const ticks = { color: '#8b93a7' };
-	const axes = { x: { grid, ticks }, y: { grid, ticks } };
+	const incomeVsExpenses = $derived(incomeExpenseBars(data.monthly));
+	const spending = $derived(spendingDoughnut(data.byCategory));
 
-	const incomeVsExpenses = $derived({
-		type: 'bar' as const,
-		data: {
-			labels: data.monthly.map((m) => m.month),
-			datasets: [
-				{ label: 'Income', data: data.monthly.map((m) => m.income), backgroundColor: '#4ade80' },
-				{ label: 'Expenses', data: data.monthly.map((m) => m.expenses), backgroundColor: '#f87171' }
-			]
-		},
-		options: {
-			maintainAspectRatio: false,
-			scales: axes,
-			plugins: { legend: { labels: { color: '#8b93a7' } } }
-		}
-	});
-
-	const spending = $derived({
-		type: 'doughnut' as const,
-		data: {
-			labels: data.byCategory.map((c) => c.category),
-			datasets: [
-				{
-					data: data.byCategory.map((c) => c.total),
-					backgroundColor: data.byCategory.map((c) => colorFor(c.category)),
-					borderColor: '#171a21'
-				}
-			]
-		},
-		options: {
-			maintainAspectRatio: false,
-			plugins: { legend: { position: 'right' as const, labels: { color: '#8b93a7' } } }
-		}
-	});
-
-	const legend = { labels: { color: '#8b93a7' } };
 	const stacked = { x: { stacked: true, grid, ticks }, y: { stacked: true, grid, ticks } };
 
 	const expensesByCategory = $derived.by(() => {

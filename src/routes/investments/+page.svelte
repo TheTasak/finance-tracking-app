@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import Chart from '$lib/Chart.svelte';
-	import { money, moneyIn, percent, priceIn, signed, signedIn } from '$lib/fmt';
+	import { money, moneyIn, percent, priceIn, rateFor, signed, signedIn } from '$lib/fmt';
+	import { grid, legend, ticks } from '$lib/charts';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
@@ -19,13 +20,7 @@
 	const bonds = $derived(data.holdings.filter((h) => h.kind === 'bond'));
 	// A part-sold position has a realised result too, so key on "has sold", not "is closed".
 	const sold = $derived(data.positions.filter((p) => p.soldQty > 0 || p.dividends));
-	/**
-	 * PLN per unit, from the very rates the server converted the summary with, so a total
-	 * added up here matches one added up there. 0 for a currency with no rate at all —
-	 * which is exactly how the server drops it, and `excluded()` reports it.
-	 */
-	const rateOf = (currency: string) =>
-		currency === 'PLN' ? 1 : (data.rates.find((r) => r.currency === currency)?.rate ?? 0);
+	const rateOf = $derived(rateFor(data.rates));
 
 	// The whole ledger arrives; the picker filters it here so the bond tab can still see
 	// its own rows while the ledger is filtered to something else.
@@ -85,9 +80,6 @@
 		remaining: bonds.reduce((s, b) => s + b.projectedInterest - b.accrued, 0)
 	});
 
-	const grid = { color: '#262b36' };
-	const ticks = { color: '#8b93a7' };
-	const legend = { labels: { color: '#8b93a7' } };
 	const month = (s: string) => (s ?? '').slice(0, 7);
 
 	/** Sum rows into one number per month of `months`. Rows outside it are dropped. */

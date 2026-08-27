@@ -478,10 +478,6 @@ export const cashBalances = () =>
 		 FROM cashop GROUP BY currency ORDER BY balance DESC`
 	);
 
-/** PLN cash at the broker — the only currency the app's totals can honestly add up. */
-export const brokerCash = () =>
-	cashBalances().find((c) => c.currency === 'PLN')?.balance ?? 0;
-
 /**
  * The rate the user themself converted at, newest first. Not used in any total — the
  * app does no FX — but a non-PLN figure is unreadable without one.

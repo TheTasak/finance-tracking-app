@@ -18,7 +18,7 @@ const UA =
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 export type Close = { date: string; close: number };
-export type Series = { currency: string; rows: Close[] };
+type Series = { currency: string; rows: Close[] };
 
 /** Yahoo's shape, narrowed to the parts worth trusting. */
 type Chart = {
@@ -197,16 +197,10 @@ export const fx = cached((): Fx => {
 		const key = at.length === 7 ? `${at}-99` : at;
 
 		// Last rate quoted on or before `key`. Markets close at weekends and holidays, so
-		// the rate in force is the most recent one, not one dated exactly that day.
-		let lo = 0;
-		let hi = s.dates.length - 1;
-		if (key < s.dates[0]) return s.rates[0]; // before coverage: the earliest known rate
-		while (lo < hi) {
-			const mid = (lo + hi + 1) >> 1;
-			if (s.dates[mid] <= key) lo = mid;
-			else hi = mid - 1;
-		}
-		return s.rates[lo];
+		// the rate in force is the most recent one, not one dated exactly that day; before
+		// coverage begins, the earliest rate known.
+		const i = s.dates.findLastIndex((d) => d <= key);
+		return s.rates[i < 0 ? 0 : i];
 	};
 
 	return {

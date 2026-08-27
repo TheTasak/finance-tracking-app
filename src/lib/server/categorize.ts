@@ -1,13 +1,7 @@
 import { all, db, get, ownIbans, run, tx } from './db.ts';
+import { PLN } from './stats.ts';
 
-export const UNCATEGORISED = 'Uncategorised';
-
-/** Amount in PLN at the rate that applied on the row's own date. Mirrors stats.ts. */
-const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
-	SELECT close FROM price
-	WHERE symbol = tx.currency || 'PLN=X' AND date <= tx.date
-	ORDER BY date DESC LIMIT 1
-) END)`;
+const UNCATEGORISED = 'Uncategorised';
 
 /**
  * A rule with this category means "this is my own money moving", not spending. It is
@@ -60,7 +54,7 @@ const SEED: [string, string][] = [
 	['BOOKING', 'Travel']
 ];
 
-export function seedRules() {
+function seedRules() {
 	if (all(`SELECT 1 FROM rule LIMIT 1`).length) return;
 	const ins = db.prepare(`INSERT INTO rule (pattern, category) VALUES (:pattern, :category)`);
 	tx(() => {

@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import Chart from '$lib/Chart.svelte';
 	import { money, percent } from '$lib/fmt';
+	import { grid, ticks } from '$lib/charts';
 	import { at, fireNumber, projectWealth, reaches, runway } from '$lib/projection';
 	import type { PageData } from './$types';
 
@@ -49,9 +50,6 @@
 	const fire = $derived(fireNumber(k.monthlyExpenses, k.withdrawalRate / 100));
 	const fireMonth = $derived(reaches(w, fire));
 	const months = $derived(runway(d.liquid, k.monthlyExpenses));
-
-	const grid = { color: '#262b36' };
-	const ticks = { color: '#8b93a7' };
 
 	// One label per year keeps a 20-year x-axis readable.
 	const yearly = <T,>(arr: T[]) => arr.filter((_, i) => i % 12 === 0);

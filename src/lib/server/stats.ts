@@ -1,10 +1,10 @@
 import { all, get } from './db.ts';
 import { type Bond, interestTo, project, totalInterest, valueAt } from './bonds.ts';
 import { cashBalances, fxRates, portfolioIncome } from './trades.ts';
-import { type Fx, fx, latestRates, monthEndCloses } from './prices.ts';
+import { fx, latestRates, monthEndCloses } from './prices.ts';
 
 /** Every income/expense figure excludes own-account transfers. */
-export const REAL = `transfer = 0`;
+const REAL = `transfer = 0`;
 
 /**
  * A row's amount in PLN: itself when already PLN, otherwise converted at the last rate
@@ -25,43 +25,53 @@ export const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
  * whose amounts are all unconvertible still forms, and would surface as a category with
  * an empty total rather than not appearing at all.
  */
-export const CONVERTIBLE = `${PLN} IS NOT NULL`;
+const CONVERTIBLE = `${PLN} IS NOT NULL`;
 
-export type Period = { from: string; to: string };
+/**
+ * Which rows a figure covers: a SQL predicate over `tx` plus its parameters. The dashboard
+ * passes a date range, /transactions its whole filter form — the arithmetic is the same.
+ */
+export type Slice = { where: string; params: Record<string, string | number> };
 
-export const ALL_TIME: Period = { from: '0000-01-01', to: '9999-12-31' };
+export const ALL_TIME: Slice = { where: '1', params: {} };
+export const between = (from: string, to: string): Slice => ({
+	where: 'date BETWEEN :from AND :to',
+	params: { from, to }
+});
 
 export function monthsCovered(): string[] {
 	return all<{ m: string }>(`SELECT DISTINCT substr(date,1,7) m FROM tx ORDER BY m`).map((r) => r.m);
 }
 
-export function totals(p: Period) {
-	const r = get<{ income: number; expenses: number }>(
+export function totals({ where, params }: Slice = ALL_TIME) {
+	const r = get<{ income: number; expenses: number; n: number }>(
 		`SELECT
 			COALESCE(SUM(CASE WHEN amount > 0 THEN ${PLN} END), 0) income,
-			COALESCE(-SUM(CASE WHEN amount < 0 THEN ${PLN} END), 0) expenses
-		 FROM tx WHERE ${REAL} AND date BETWEEN :from AND :to`,
-		p
+			COALESCE(-SUM(CASE WHEN amount < 0 THEN ${PLN} END), 0) expenses,
+			COUNT(*) n
+		 FROM tx WHERE ${REAL} AND ${where}`,
+		params
 	)!;
 	const saved = r.income - r.expenses;
 	return { ...r, saved, savingsRate: r.income > 0 ? saved / r.income : 0 };
 }
 
-export function monthly() {
+export function monthly({ where, params }: Slice = ALL_TIME) {
 	return all<{ month: string; income: number; expenses: number }>(
 		`SELECT substr(date,1,7) month,
 			COALESCE(SUM(CASE WHEN amount > 0 THEN ${PLN} END), 0) income,
 			COALESCE(-SUM(CASE WHEN amount < 0 THEN ${PLN} END), 0) expenses
-		 FROM tx WHERE ${REAL} GROUP BY month ORDER BY month`
+		 FROM tx WHERE ${REAL} AND ${where} GROUP BY month ORDER BY month`,
+		params
 	).map((r) => ({ ...r, saved: r.income - r.expenses }));
 }
 
-export function byCategory(p: Period) {
+export function byCategory({ where, params }: Slice = ALL_TIME) {
 	return all<{ category: string; total: number }>(
 		`SELECT COALESCE(category,'Uncategorised') category, -SUM(${PLN}) total
-		 FROM tx WHERE ${REAL} AND ${CONVERTIBLE} AND amount < 0 AND date BETWEEN :from AND :to
+		 FROM tx WHERE ${REAL} AND ${CONVERTIBLE} AND amount < 0 AND ${where}
 		 GROUP BY category ORDER BY total DESC`,
-		p
+		params
 	);
 }
 
@@ -154,14 +164,13 @@ export function holdings() {
 	});
 }
 
-/** Every bond that has enough data to project. */
-export function bonds(): Bond[] {
-	return all<Holding>(`SELECT * FROM holding WHERE kind = 'bond' ORDER BY maturity`).filter(
-		isBond
-	) as unknown as Bond[];
-}
-
-export const bondProjection = () => project(bonds());
+/** Every bond with enough data to project, on one monthly timeline. */
+export const bondProjection = () =>
+	project(
+		all<Holding>(`SELECT * FROM holding WHERE kind = 'bond' ORDER BY maturity`).filter(
+			isBond
+		) as unknown as Bond[]
+	);
 
 /**
  * Everything you hold, in PLN. Foreign positions convert at today's rate; a currency we
@@ -442,7 +451,7 @@ export function netWorthSeries() {
  */
 export function projectionDefaults() {
 	const months = monthly();
-	const t = totals(ALL_TIME);
+	const t = totals();
 	const hs = holdings();
 
 	// PLN only, to match `start` — the app does no FX.

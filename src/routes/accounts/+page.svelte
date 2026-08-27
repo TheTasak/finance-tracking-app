@@ -1,13 +1,11 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { money, moneyIn } from '$lib/fmt';
+	import { money, moneyIn, rateFor } from '$lib/fmt';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
-	/** PLN per unit, from the same stored rates the net-worth line converts with. */
-	const rateOf = (currency: string) =>
-		currency === 'PLN' ? 1 : (data.rates.find((r) => r.currency === currency)?.rate ?? 0);
+	const rateOf = $derived(rateFor(data.rates));
 
 	const manual = $derived(data.accounts.filter((a: any) => a.kind === 'manual'));
 	const bank = $derived(data.accounts.filter((a: any) => a.kind === 'bank'));

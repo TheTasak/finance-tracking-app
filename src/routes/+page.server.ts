@@ -1,14 +1,13 @@
 import type { PageServerLoad } from './$types';
 import * as stats from '$lib/server/stats';
-import { all } from '$lib/server/db';
+import { get } from '$lib/server/db';
 
-/** from/to for a named period, derived from the newest transaction rather than the wall clock. */
-function period(name: string, months: string[]): stats.Period {
+/** The rows a named period covers, dated from the newest transaction, not the wall clock. */
+function period(name: string, months: string[]): stats.Slice {
 	const last = months.at(-1);
 	if (!last || name === 'all') return stats.ALL_TIME;
-	if (name === 'month') return { from: `${last}-01`, to: `${last}-31` };
-	const from = months.at(-3) ?? months[0];
-	return { from: `${from}-01`, to: `${last}-31` };
+	if (name === 'month') return stats.between(`${last}-01`, `${last}-31`);
+	return stats.between(`${months.at(-3) ?? months[0]}-01`, `${last}-31`);
 }
 
 export const load: PageServerLoad = ({ url }) => {
@@ -16,8 +15,8 @@ export const load: PageServerLoad = ({ url }) => {
 	const name = url.searchParams.get('period') ?? 'all';
 	const p = period(name, months);
 
-	const holdings = all<{ n: number }>(`SELECT COUNT(*) n FROM holding`)[0].n;
-	const snapshots = all<{ n: number }>(`SELECT COUNT(*) n FROM snapshot`)[0].n;
+	const holdings = get<{ n: number }>(`SELECT COUNT(*) n FROM holding`)!.n;
+	const snapshots = get<{ n: number }>(`SELECT COUNT(*) n FROM snapshot`)!.n;
 
 	return {
 		period: name,

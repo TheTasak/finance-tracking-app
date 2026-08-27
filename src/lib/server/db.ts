@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS tx (
   amount REAL, currency TEXT, balance REAL,
   category TEXT,
   transfer INTEGER DEFAULT 0,
+  -- Kept so the transfer flag stays a pure function of the row rather than a verdict
+  -- frozen at import time — see recategorizeAll.
+  counter_iban TEXT,
   -- Position in the source export. Millennium writes newest-first, so within one
   -- date the SMALLER seq is the LATER transaction: order by date DESC, seq ASC.
   seq INTEGER DEFAULT 0
@@ -44,7 +47,8 @@ CREATE TABLE IF NOT EXISTS holding (
   -- 'broker' rows are rebuilt from the trade table on every import: qty and
   -- buy_price are derived, only the manual price survives. 'manual' rows are yours.
   source TEXT DEFAULT 'manual',
-  isin TEXT                      -- broker rows only: the key the importer syncs on
+  isin TEXT,                     -- broker rows only: the key the importer syncs on
+  symbol TEXT                    -- Yahoo ticker the price feed reads: 'CDR.WA'. Blank = untracked.
 );
 
 -- Broker execution history. One row per fill, not per order: Bossa splits a single
@@ -135,33 +139,6 @@ CREATE TABLE IF NOT EXISTS snapshot (
   PRIMARY KEY (account_id, month)
 );
 `);
-
-// The price feed moved from Stooq to Yahoo, so the column holds a Yahoo ticker now.
-// Renamed rather than re-added: the symbols are yours, only their spelling changed.
-{
-	const cols = db.prepare(`PRAGMA table_info(holding)`).all() as { name: string }[];
-	if (cols.some((c) => c.name === 'stooq') && !cols.some((c) => c.name === 'symbol'))
-		db.exec(`ALTER TABLE holding RENAME COLUMN stooq TO symbol`);
-}
-
-// SQLite has no ADD COLUMN IF NOT EXISTS, so bring older files up to date by hand.
-for (const [table, col, def] of [
-	['tx', 'seq', 'INTEGER DEFAULT 0'],
-	// Kept so the transfer flag stays a pure function of the row rather than a verdict
-	// frozen at import time — see recategorizeAll.
-	['tx', 'counter_iban', 'TEXT'],
-	['holding', 'coupon_rate', 'REAL'],
-	['holding', 'maturity', 'TEXT'],
-	['holding', 'compound_freq', 'TEXT'],
-	['holding', 'capitalize', 'INTEGER DEFAULT 1'],
-	['account', 'is_cash', 'INTEGER DEFAULT 0'],
-	['holding', 'source', "TEXT DEFAULT 'manual'"],
-	['holding', 'isin', 'TEXT'],
-	['holding', 'symbol', 'TEXT']
-] as const) {
-	const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-	if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
-}
 
 // node:sqlite hands back null-prototype objects; SvelteKit's serializer wants plain ones.
 export const all = <T = any>(sql: string, params: any = {}): T[] =>

@@ -9,8 +9,13 @@ npm test                           # bond math, every importer, prices and FX
 npm run build && node build/index.js
 ```
 
-How the code is laid out: [docs/architecture.md](docs/architecture.md). What the
-importable files look like: [docs/formats.md](docs/formats.md).
+What the importable files look like: [docs/formats.md](docs/formats.md). The column
+comments in `src/lib/server/db.ts` are the schema documentation.
+
+`npm test` runs `node:test` over `src/**/*.test.ts`; `npm run check` runs svelte-check.
+The tests point `FINANCE_DB` at their own file and wipe it, and their fixtures are the
+real exports sitting in the repo root, which are gitignored — a fresh clone fails them on
+the missing file, and the assertions name exact row counts from those exports.
 
 Data lives in `data/finance.db` (SQLite via the built-in `node:sqlite` — no native
 build step). It is gitignored. Delete the file to start over; the schema is
@@ -27,6 +32,43 @@ recreated on boot and missing columns are added automatically.
 | Accounts | Rename bank accounts, add manual ones (other banks, XTB, Revolut), type monthly balances |
 | Import | Upload a Millennium CSV, a Bossa `hisPW` CSV, a Bossa cash ledger, or an obligacjeskarbowe.pl `.xls` |
 
+## How it fits together
+
+SvelteKit 2 (Svelte 5 runes) + `node:sqlite`. No ORM, no API layer: every page loads
+through a `+page.server.ts` that calls `src/lib/server/*` directly, and every write is a
+form action. Chart.js is the only runtime dependency.
+
+```
+upload  ──▶ parse*()         ──▶ import*()        ──▶ SQLite (data/finance.db)
+            pure, throws on         INSERT OR IGNORE      │
+            a bad file              inside one tx         │
+                                                          ▼
+                                            stats.ts / trades.ts / bonds.ts
+                                            read-only derivation, no cache in the DB
+                                                          │
+                                                          ▼
+                                            +page.server.ts load() ──▶ +page.svelte
+```
+
+Nothing derived is stored: positions, cost basis, net worth, bond value and every chart
+are recomputed per request. Two exceptions are written on purpose — `holding` rows with
+`source='broker'` or `'treasury'`, mirrors of the trade history and the bond export so
+imported positions run through the manual-holding code paths unchanged, and `price`,
+because Yahoo is a network call.
+
+Four conventions that bite if ignored:
+
+- **`seq` is reverse order.** Millennium writes newest-first, so within one date the
+  *smaller* `seq` is the *later* row: `ORDER BY date DESC, seq ASC`.
+- **Conversion happens in SQL for transactions, in JS for balances.** `stats.ts`'s `PLN`
+  snippet converts a `tx` row at the last rate on or before its own date; `fx()` converts
+  balances and holdings at `now()`. Never convert at 1:1 as a fallback.
+- **Derived flags are recomputed, not frozen.** `tx.transfer` and `tx.category` are a pure
+  function of the row plus the current rules, which is why deleting a `Transfer` rule puts
+  the row back into spending.
+- **`fx()` and `monthEndCloses()` are memoised** on `total_changes()` + `data_version()`, so
+  one render converts every figure at the same rates and a write anywhere invalidates them.
+
 ## Things worth knowing
 
 **Own transfers are netted out.** Moving money to your own savings account is not
@@ -41,22 +83,12 @@ description and balance, so overlapping exports add only what is new.
 The export is newest-first, so rows carry a `seq` and month-end balances are picked
 with `ORDER BY date DESC, seq ASC`.
 
-**Two Bossa exports, one portfolio.** Both are Windows-1250 and semicolon-separated,
-and both are read as bytes rather than text — `file.text()` mangles *ilość*.
-
-- **`hisPW`** — exchange fills only, with the broker's own commission split. Most exact
-  cost basis, but it covers one market: it omits USD trades and anything that is not a
-  buy or a sell.
-- **historia finansowa** — the full cash ledger. Dividends, bond coupons and
-  redemptions, deposits, currency exchanges, tender offers, fees, *and* every fill
-  again. This is the more complete file.
-
-They overlap, so a fill's primary key is natural: date, instrument, side, quantity,
-price, currency and an occurrence counter. It deliberately excludes value, commission
-and time — `hisPW` files 400 × 21.8385 as 8735.38 rather than 8735.40 and the ledger
-has no clock, so anything derived from those would stop the two files recognising a
-shared fill. The counter is what keeps a genuinely repeated fill (Energy Fuels sold
-100 at 5.63 twice in one day) as two lots. Import either file, or both, in any order.
+**Two Bossa exports, one portfolio.** `hisPW` is exchange fills only, carrying the
+broker's own commission split — the most exact cost basis, but one market and buys and
+sells only. *historia finansowa* is the full cash ledger and the more complete file. They
+overlap on the fills they share and collapse onto the same natural key, so import either
+or both, in any order. Encodings, columns and that key are in
+[formats.md](docs/formats.md).
 
 **Cost basis is FIFO, per instrument *and per currency*.** The same ISIN can trade on
 two markets — Energy Fuels was bought in PLN on the GPW and in USD on XASE — and one

@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import Chart from '$lib/Chart.svelte';
-	import { colorFor, money, moneyIn, percent } from '$lib/fmt';
-	import { CATEGORIES } from '$lib/fmt';
+	import { CATEGORIES, money, moneyIn, percent } from '$lib/fmt';
+	import { incomeExpenseBars, spendingDoughnut } from '$lib/charts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -41,45 +41,9 @@
 	);
 
 	const filtered = $derived(Object.values(data.filters).some(Boolean));
-	const saved = $derived(data.summary.income - data.summary.expenses);
 
-	const grid = { color: '#262b36' };
-	const ticks = { color: '#8b93a7' };
-	const legend = { labels: { color: '#8b93a7' } };
-
-	const incomeVsExpenses = $derived({
-		type: 'bar' as const,
-		data: {
-			labels: data.monthly.map((m) => m.month),
-			datasets: [
-				{ label: 'Income', data: data.monthly.map((m) => m.income), backgroundColor: '#4ade80' },
-				{ label: 'Expenses', data: data.monthly.map((m) => m.expenses), backgroundColor: '#f87171' }
-			]
-		},
-		options: {
-			maintainAspectRatio: false,
-			scales: { x: { grid, ticks }, y: { grid, ticks } },
-			plugins: { legend }
-		}
-	});
-
-	const spending = $derived({
-		type: 'doughnut' as const,
-		data: {
-			labels: data.byCategory.map((c) => c.category),
-			datasets: [
-				{
-					data: data.byCategory.map((c) => c.total),
-					backgroundColor: data.byCategory.map((c) => colorFor(c.category)),
-					borderColor: '#171a21'
-				}
-			]
-		},
-		options: {
-			maintainAspectRatio: false,
-			plugins: { legend: { position: 'right' as const, labels: { color: '#8b93a7' } } }
-		}
-	});
+	const incomeVsExpenses = $derived(incomeExpenseBars(data.monthly));
+	const spending = $derived(spendingDoughnut(data.byCategory));
 </script>
 
 <!-- Same filter on both tabs, so a slice you set up on one carries to the other. -->
@@ -138,9 +102,11 @@
 			</div>
 			<div class="panel kpi">
 				<div class="label">Net</div>
-				<div class="value" class:pos={saved >= 0} class:neg={saved < 0}>{money(saved)}</div>
+				<div class="value" class:pos={data.summary.saved >= 0} class:neg={data.summary.saved < 0}>
+					{money(data.summary.saved)}
+				</div>
 				<div class="sub">
-					{data.summary.income > 0 ? percent(saved / data.summary.income) : '—'} of income
+					{data.summary.income > 0 ? percent(data.summary.saved / data.summary.income) : '—'} of income
 				</div>
 			</div>
 			<div class="panel kpi">
@@ -189,7 +155,9 @@
 
 	<p class="note">
 		{data.total} matching · net of non-transfer rows
-		<strong class:pos={data.sum >= 0} class:neg={data.sum < 0}>{money(data.sum)}</strong>
+		<strong class:pos={data.summary.saved >= 0} class:neg={data.summary.saved < 0}>
+			{money(data.summary.saved)}
+		</strong>
 	</p>
 
 	<div class="panel scroll">
