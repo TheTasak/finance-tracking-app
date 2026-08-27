@@ -184,16 +184,22 @@
 	{#if data.excluded.length || data.doubleCountRisk}
 		<div class="panel" style="margin-top:1rem">
 			{#each data.excluded as e (e.currency)}
-				<p class="note">
-					Not in the PLN figures above — the app does no FX conversion:
+				<p class={e.converted ? 'note' : 'warn'}>
 					{#if e.holdings}<strong>{moneyIn(e.holdings, e.currency)}</strong> of holdings,{/if}
 					{#if e.cash}<strong>{moneyIn(e.cash, e.currency)}</strong> of brokerage cash,{/if}
 					{#if e.txns}{e.txns} {e.currency} bank transaction{e.txns === 1 ? '' : 's'},{/if}
-					{#if e.rate && e.holdings + e.cash}
-						together <strong>≈ {money((e.holdings + e.cash) * e.rate)}</strong> at the
-						{e.rate} you last converted at ({e.rateAt}) — for reading only, it is counted nowhere.
+					{#if e.converted}
+						converted into the PLN figures above at {e.currency}/PLN
+						<strong>{e.rate.toFixed(4)}</strong> (Yahoo, {e.rateAt}){#if e.holdings + e.cash},
+							so <strong>≈ {money((e.holdings + e.cash) * e.rate)}</strong>{/if}. Each past
+						month converts at its own rate, not this one.
 					{:else}
-						all held and shown in {e.currency}.
+						left out of the PLN figures above — no {e.currency}/PLN rate is stored, and counting
+						it at 1:1 would be worse than not counting it.
+						{#if e.rate && e.holdings + e.cash}
+							For reading only: <strong>≈ {money((e.holdings + e.cash) * e.rate)}</strong> at the
+							{e.rate} you last converted at ({e.rateAt}).
+						{/if}
 					{/if}
 				</p>
 			{/each}

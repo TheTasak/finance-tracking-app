@@ -1,6 +1,6 @@
 import { all, get } from './db.ts';
 import { type Bond, interestTo, project, totalInterest, valueAt } from './bonds.ts';
-import { brokerCash, cashBalances, fxRates } from './trades.ts';
+import { cashBalances, fxRates, portfolioIncome } from './trades.ts';
 import { type Fx, fx, latestRates, monthEndCloses } from './prices.ts';
 
 /** Every income/expense figure excludes own-account transfers. */
@@ -171,13 +171,45 @@ export function investmentTotals() {
 	const rates = fx();
 	let cost = 0;
 	let value = 0;
+	// Split by asset class too — the allocation chart needs it and the walk is already here.
+	let stocks = 0;
+	let bonds = 0;
 	for (const h of holdings()) {
 		const r = rates.now(h.currency);
 		if (r === undefined) continue;
 		cost += h.cost * r;
 		value += h.value * r;
+		if (h.kind === 'bond') bonds += h.value * r;
+		else stocks += h.value * r;
 	}
-	return { cost, value, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
+	return { cost, value, stocks, bonds, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
+}
+
+/** Brokerage cash across every convertible currency, in PLN. */
+export function cashInPLN() {
+	const rates = fx();
+	return cashBalances().reduce((s, c) => s + c.balance * (rates.now(c.currency) ?? 0), 0);
+}
+
+/**
+ * The whole portfolio as one PLN figure per line — holdings, brokerage cash, and every
+ * source of income — with each currency converted at its newest rate. A currency with no
+ * rate series at all still drops out; `excluded()` says which case a currency is in.
+ */
+export function portfolioSummary() {
+	const rates = fx();
+	const income = portfolioIncome();
+	const sum = (value: (i: (typeof income)[number]) => number) =>
+		income.reduce((s, i) => s + value(i) * (rates.now(i.currency) ?? 0), 0);
+	return {
+		...investmentTotals(),
+		cash: cashInPLN(),
+		realized: sum((i) => i.realized),
+		/** Dividends and coupons together: cash the portfolio paid out to you. */
+		payouts: sum((i) => i.dividends + i.coupons),
+		fees: sum((i) => i.fees),
+		made: sum((i) => i.total)
+	};
 }
 
 export function netWorth() {
@@ -190,10 +222,7 @@ export function netWorth() {
 			return rate === undefined ? [] : [{ row: r, rate }];
 		});
 
-	const cash = cashBalances().reduce(
-		(s, c) => s + c.balance * (rates.now(c.currency) ?? 0),
-		0
-	);
+	const cash = cashInPLN();
 	const parts = [
 		...conv(bankBalances()).map(({ row, rate }) => ({
 			label: row.label,

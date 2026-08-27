@@ -617,3 +617,33 @@ test('an unconvertible currency is left out rather than counted at 1:1', () => {
 	assert.equal(gbp.converted, false, 'and it is reported as left out');
 	run(`DELETE FROM tx WHERE id = 'gbp-1'`);
 });
+
+test('a foreign portfolio is summed in PLN, and dropped when it has no rate', () => {
+	run(`DELETE FROM price`);
+	run(`INSERT INTO price (symbol, date, close) VALUES ('USDPLN=X', '2026-08-27', 3.7204)`);
+
+	const cash = T.cashBalances();
+	const pln = cash.find((c) => c.currency === 'PLN')!.balance;
+	const usd = cash.find((c) => c.currency === 'USD')!.balance;
+	assert.ok(usd > 0, 'the fixture has USD cash to fold in');
+
+	const withRate = stats.portfolioSummary();
+	assert.ok(
+		Math.abs(withRate.cash - (pln + usd * 3.7204)) < 0.01,
+		`USD cash must be converted, not dropped: ${withRate.cash}`
+	);
+	// Income too — the summary is one PLN line per source, not just the PLN row of it.
+	const income = T.portfolioIncome();
+	const made = income.reduce(
+		(s, i) => s + i.total * (i.currency === 'PLN' ? 1 : i.currency === 'USD' ? 3.7204 : 0),
+		0
+	);
+	assert.ok(Math.abs(withRate.made - made) < 0.01, `money made ${withRate.made} ≠ ${made}`);
+	assert.ok(withRate.stocks > 0 && Math.abs(withRate.value - (withRate.stocks + withRate.bonds)) < 0.01);
+
+	// No rate at all is still a drop-out, never a 1:1 addition.
+	run(`DELETE FROM price`);
+	const noRate = stats.portfolioSummary();
+	assert.ok(Math.abs(noRate.cash - pln) < 0.01, `PLN cash only, got ${noRate.cash}`);
+	assert.equal(stats.excluded().find((e) => e.currency === 'USD')!.converted, false);
+});

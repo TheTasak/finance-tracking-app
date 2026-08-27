@@ -194,3 +194,26 @@ label.field {
 .scroll {
 	overflow-x: auto;
 }
+
+/* Sub-tabs inside a page. Same look as the top nav, one level down. */
+.tabs {
+	display: flex;
+	gap: 1.25rem;
+	border-bottom: 1px solid var(--line);
+	margin-bottom: 1rem;
+}
+.tabs a {
+	color: var(--muted);
+	text-decoration: none;
+	padding: 0.4rem 0;
+	border-bottom: 2px solid transparent;
+	margin-bottom: -1px;
+}
+.tabs a:hover {
+	color: var(--text);
+}
+.tabs a[aria-current='page'] {
+	color: var(--text);
+	font-weight: 600;
+	border-bottom-color: var(--pos);
+}

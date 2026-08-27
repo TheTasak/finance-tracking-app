@@ -6,7 +6,8 @@ import {
 	currentMonth,
 	excluded,
 	holdings,
-	investmentTotals
+	investmentTotals,
+	portfolioSummary
 } from '$lib/server/stats';
 import { BELKA, PERIODS } from '$lib/server/bonds';
 import {
@@ -24,8 +25,10 @@ export const load: PageServerLoad = ({ url }) => {
 	const isin = url.searchParams.get('isin') || '';
 	const kind = url.searchParams.get('kind') || '';
 	return {
+		tab: url.searchParams.get('tab') || 'dashboard',
 		holdings: holdings(),
 		totals: investmentTotals(),
+		summary: portfolioSummary(),
 		projection: bondProjection(),
 		month: currentMonth(),
 		belka: BELKA,
@@ -39,7 +42,9 @@ export const load: PageServerLoad = ({ url }) => {
 		// ponytail: whole history, no paging — a personal broker account is hundreds of
 		// rows, not millions. Add LIMIT/OFFSET like /transactions if it ever drags.
 		trades: trades(isin),
-		ops: cashOps(kind),
+		// The whole ledger, filtered in the page: the bond tab needs the bond rows whatever
+		// the ledger filter is set to, and a personal ledger is small enough to send twice over.
+		ops: cashOps(),
 		isin,
 		kind
 	};
