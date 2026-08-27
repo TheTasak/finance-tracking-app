@@ -4,7 +4,7 @@ import { cashBalances, fxRates, portfolioIncome } from './trades.ts';
 import { type Fx, fx, latestRates, monthEndCloses } from './prices.ts';
 
 /** Every income/expense figure excludes own-account transfers. */
-const REAL = `transfer = 0`;
+export const REAL = `transfer = 0`;
 
 /**
  * A row's amount in PLN: itself when already PLN, otherwise converted at the last rate
@@ -14,7 +14,7 @@ const REAL = `transfer = 0`;
  * A currency with no rate at all yields NULL, and SUM skips NULLs, so such a row drops
  * out of the totals instead of being counted at 1:1. `excluded()` reports what fell out.
  */
-const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
+export const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
 	SELECT close FROM price
 	WHERE symbol = tx.currency || 'PLN=X' AND date <= tx.date
 	ORDER BY date DESC LIMIT 1
@@ -25,7 +25,7 @@ const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
  * whose amounts are all unconvertible still forms, and would surface as a category with
  * an empty total rather than not appearing at all.
  */
-const CONVERTIBLE = `${PLN} IS NOT NULL`;
+export const CONVERTIBLE = `${PLN} IS NOT NULL`;
 
 export type Period = { from: string; to: string };
 
