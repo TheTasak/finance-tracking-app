@@ -2,6 +2,13 @@ import { all, db, get, ownIbans, run, tx } from './db.ts';
 
 export const UNCATEGORISED = 'Uncategorised';
 
+/** Amount in PLN at the rate that applied on the row's own date. Mirrors stats.ts. */
+const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
+	SELECT close FROM price
+	WHERE symbol = tx.currency || 'PLN=X' AND date <= tx.date
+	ORDER BY date DESC LIMIT 1
+) END)`;
+
 /**
  * A rule with this category means "this is my own money moving", not spending. It is
  * how an account of yours at another bank gets recognised: the export names it but
@@ -94,12 +101,13 @@ export function applyRules(description: string, counterparty: string, type = '')
  * matters more than twenty 3 zł bus tickets.
  */
 export function uncategorisedMerchants(limit = 25) {
+	// Same per-date conversion as the rest of the spending figures, so the ranking here
+	// matches the categories page rather than quietly dropping foreign purchases.
 	const rows = all<{ description: string; counterparty: string; type: string; amount: number }>(
-		`SELECT description, counterparty, type, amount FROM tx
-		 WHERE transfer = 0 AND currency = 'PLN' AND amount < 0
-		   AND (category IS NULL OR category = :u)`,
+		`SELECT description, counterparty, type, ${PLN} amount FROM tx
+		 WHERE transfer = 0 AND amount < 0 AND (category IS NULL OR category = :u)`,
 		{ u: UNCATEGORISED }
-	);
+	).filter((r) => Number.isFinite(r.amount));
 
 	const groups = new Map<string, { merchant: string; n: number; total: number }>();
 	for (const r of rows) {
@@ -113,8 +121,7 @@ export function uncategorisedMerchants(limit = 25) {
 	const list = [...groups.values()].sort((a, b) => b.total - a.total);
 	const total = list.reduce((s, g) => s + g.total, 0);
 	const spend = get<{ s: number }>(
-		`SELECT COALESCE(-SUM(amount),0) s FROM tx
-		 WHERE transfer = 0 AND currency = 'PLN' AND amount < 0`
+		`SELECT COALESCE(-SUM(${PLN}),0) s FROM tx WHERE transfer = 0 AND amount < 0`
 	)!.s;
 
 	return {

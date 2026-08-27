@@ -39,7 +39,7 @@ test('import is idempotent and flags own transfers', () => {
 	assert.equal(inc, 35000, 'incoming own transfers must match exactly');
 });
 
-test('PLN totals exclude transfers and EUR', () => {
+test('totals exclude transfers, and a currency with no rates at all', () => {
 	const { income, expenses, savingsRate } = stats.totals(stats.ALL_TIME);
 
 	// 54 803 salary + 1 000 from Iwona + 160.88 interest + 97.45 refunds. No 35k of own transfers.
@@ -49,7 +49,7 @@ test('PLN totals exclude transfers and EUR', () => {
 	assert.ok(Math.abs(savingsRate - 0.7269) < 0.001, `savings rate ${savingsRate}`);
 
 	assert.deepEqual(stats.excluded(), [
-		{ currency: 'EUR', txns: 2, holdings: 0, cash: 0, rate: 0, rateAt: '', rateSource: '' }
+		{ currency: 'EUR', txns: 2, holdings: 0, cash: 0, rate: 0, rateAt: '', rateSource: '', converted: false }
 	]);
 });
 
@@ -524,4 +524,85 @@ test('a rate is never mistaken for a holding price', () => {
 		'no holding is ever tagged with an FX pair'
 	);
 	run(`DELETE FROM price`);
+});
+
+// ── Historical FX ──────────────────────────────────────────────────────────
+
+test('a rate lookup uses the last rate quoted on or before the date asked for', () => {
+	run(`DELETE FROM price`);
+	for (const [date, close] of [
+		['2025-01-15', 4.2],
+		['2025-06-10', 4.5],
+		['2026-08-27', 4.33]
+	] as const)
+		run(`INSERT INTO price (symbol, date, close) VALUES ('EURPLN=X', :date, :close)`, {
+			date,
+			close
+		});
+
+	const f = P.fx();
+	assert.equal(f.on('PLN', '2020-01-01'), 1, 'PLN is always itself');
+	assert.equal(f.on('EUR', '2025-01-15'), 4.2, 'the day itself');
+	// Markets shut at weekends, so a date with no quote takes the one still in force.
+	assert.equal(f.on('EUR', '2025-03-01'), 4.2);
+	assert.equal(f.on('EUR', '2025-06-10'), 4.5);
+	assert.equal(f.on('EUR', '2025-06-09'), 4.2, 'never a rate from the future');
+	// A month means its end, so it must not pick up the rate from the 1st.
+	assert.equal(f.on('EUR', '2025-06'), 4.5);
+	assert.equal(f.on('EUR', '2025-05'), 4.2);
+	assert.equal(f.now('EUR'), 4.33);
+	// Before coverage there is nothing better than the earliest rate we hold.
+	assert.equal(f.on('EUR', '2001-01-01'), 4.2);
+	assert.equal(f.on('GBP', '2025-06-10'), undefined, 'unknown currency stays unknown');
+	assert.deepEqual([...f.known].sort(), ['EUR', 'PLN']);
+	run(`DELETE FROM price`);
+});
+
+test('a past month converts at its own rate, not at today’s', () => {
+	run(`DELETE FROM price`);
+	// Rates first, so the baseline already includes any other foreign row in the file and
+	// the delta below is only ever the one purchase this test adds.
+	run(`INSERT INTO price (symbol, date, close) VALUES ('EURPLN=X', '2025-06-02', 4.0)`);
+	run(`INSERT INTO price (symbol, date, close) VALUES ('EURPLN=X', '2026-08-27', 10.0)`);
+
+	const before = stats.totals(stats.ALL_TIME).expenses;
+	const juneBefore = stats.monthly().find((m) => m.month === '2025-06')?.expenses ?? 0;
+
+	run(
+		`INSERT OR REPLACE INTO tx (id, account, date, settled, type, counterparty, description,
+			amount, currency, balance, category, transfer, seq, counter_iban)
+		 VALUES ('eur-1', 'PL43 1160 2202 0000 0003 8734 9839', '2025-06-15', '2025-06-15', 'Card',
+			'AIRBNB', 'AIRBNB PARIS', -100, 'EUR', 0, 'Travel', 0, 0, '')`
+	);
+
+	// 100 EUR spent in June 2025 cost 400 zł at the rate then. Today's 10.0 would say 1000.
+	const spent = stats.totals(stats.ALL_TIME).expenses - before;
+	assert.ok(Math.abs(spent - 400) < 0.01, `expected 400 at June's rate, got ${spent.toFixed(2)}`);
+
+	// It lands in its own month of the series, at that month's rate.
+	const june = (stats.monthly().find((m) => m.month === '2025-06')?.expenses ?? 0) - juneBefore;
+	assert.ok(Math.abs(june - 400) < 0.01, `June expenses moved by ${june.toFixed(2)}`);
+
+	run(`DELETE FROM tx WHERE id = 'eur-1'`);
+	run(`DELETE FROM price`);
+});
+
+test('an unconvertible currency is left out rather than counted at 1:1', () => {
+	run(`DELETE FROM price`);
+	run(
+		`INSERT OR REPLACE INTO tx (id, account, date, settled, type, counterparty, description,
+			amount, currency, balance, category, transfer, seq, counter_iban)
+		 VALUES ('gbp-1', 'PL43 1160 2202 0000 0003 8734 9839', '2025-06-15', '2025-06-15', 'Card',
+			'SHOP', 'LONDON SHOP', -100, 'GBP', 0, 'Shopping', 0, 0, '')`
+	);
+	const before = stats.totals(stats.ALL_TIME).expenses;
+	// No GBPPLN=X anywhere, so the row must not reach the total as a bare 100.
+	assert.equal(stats.totals(stats.ALL_TIME).expenses, before);
+	assert.ok(
+		!stats.byCategory(stats.ALL_TIME).some((c) => c.category === 'Shopping'),
+		'an unconvertible row must not appear as spending'
+	);
+	const gbp = stats.excluded().find((e) => e.currency === 'GBP')!;
+	assert.equal(gbp.converted, false, 'and it is reported as left out');
+	run(`DELETE FROM tx WHERE id = 'gbp-1'`);
 });

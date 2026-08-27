@@ -127,6 +127,64 @@ export function latestRates(): Rate[] {
 	);
 }
 
+/**
+ * PLN per unit of a currency, on whatever date you ask for.
+ *
+ * Built once and reused: every figure in one render must convert at the same rates, and
+ * loading the whole series beats a query per row.
+ */
+export type Fx = {
+	/**
+	 * PLN per unit of `currency` as at `on` — a date (YYYY-MM-DD) or a month (YYYY-MM),
+	 * which means its last day. `undefined` when the currency has no rates at all, so a
+	 * caller can leave the amount out rather than invent a number for it.
+	 */
+	on(currency: string, on: string): number | undefined;
+	/** PLN per unit at the newest rate held. */
+	now(currency: string): number | undefined;
+	/** The currencies that can be converted at all. PLN is always one of them. */
+	known: Set<string>;
+};
+
+export function fx(): Fx {
+	const series = new Map<string, { dates: string[]; rates: number[] }>();
+	for (const r of all<{ currency: string; date: string; close: number }>(
+		`SELECT replace(symbol, 'PLN=X', '') currency, date, close FROM price
+		 WHERE symbol LIKE '%PLN=X' ORDER BY currency, date`
+	)) {
+		let s = series.get(r.currency);
+		if (!s) series.set(r.currency, (s = { dates: [], rates: [] }));
+		s.dates.push(r.date);
+		s.rates.push(r.close);
+	}
+
+	const on = (currency: string, at: string) => {
+		if (currency === 'PLN') return 1;
+		const s = series.get(currency);
+		if (!s || !s.dates.length) return undefined;
+		// A month means its end, so '2025-06' must sort after '2025-06-30'.
+		const key = at.length === 7 ? `${at}-99` : at;
+
+		// Last rate quoted on or before `key`. Markets close at weekends and holidays, so
+		// the rate in force is the most recent one, not one dated exactly that day.
+		let lo = 0;
+		let hi = s.dates.length - 1;
+		if (key < s.dates[0]) return s.rates[0]; // before coverage: the earliest known rate
+		while (lo < hi) {
+			const mid = (lo + hi + 1) >> 1;
+			if (s.dates[mid] <= key) lo = mid;
+			else hi = mid - 1;
+		}
+		return s.rates[lo];
+	};
+
+	return {
+		on,
+		now: (currency) => on(currency, '9999-12-31'),
+		known: new Set(['PLN', ...series.keys()])
+	};
+}
+
 /** Newest close stored for a symbol, if any. */
 const latest = (symbol: string) =>
 	get<Close>(`SELECT date, close FROM price WHERE symbol = :symbol ORDER BY date DESC LIMIT 1`, {

@@ -1,10 +1,31 @@
 import { all, get } from './db.ts';
 import { type Bond, interestTo, project, totalInterest, valueAt } from './bonds.ts';
 import { brokerCash, cashBalances, fxRates } from './trades.ts';
-import { latestRates, monthEndCloses } from './prices.ts';
+import { type Fx, fx, latestRates, monthEndCloses } from './prices.ts';
 
-/** Every income/expense figure is PLN-only and excludes own-account transfers. */
-const REAL = `transfer = 0 AND currency = 'PLN'`;
+/** Every income/expense figure excludes own-account transfers. */
+const REAL = `transfer = 0`;
+
+/**
+ * A row's amount in PLN: itself when already PLN, otherwise converted at the last rate
+ * quoted on or before its own date — so a 2025 purchase in euro is worth what it cost
+ * you in 2025, not what it would cost today.
+ *
+ * A currency with no rate at all yields NULL, and SUM skips NULLs, so such a row drops
+ * out of the totals instead of being counted at 1:1. `excluded()` reports what fell out.
+ */
+const PLN = `(amount * CASE WHEN tx.currency = 'PLN' THEN 1 ELSE (
+	SELECT close FROM price
+	WHERE symbol = tx.currency || 'PLN=X' AND date <= tx.date
+	ORDER BY date DESC LIMIT 1
+) END)`;
+
+/**
+ * A row we can actually put a PLN figure on. Needed wherever rows are GROUPed: a group
+ * whose amounts are all unconvertible still forms, and would surface as a category with
+ * an empty total rather than not appearing at all.
+ */
+const CONVERTIBLE = `${PLN} IS NOT NULL`;
 
 export type Period = { from: string; to: string };
 
@@ -17,8 +38,8 @@ export function monthsCovered(): string[] {
 export function totals(p: Period) {
 	const r = get<{ income: number; expenses: number }>(
 		`SELECT
-			COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0) income,
-			COALESCE(-SUM(CASE WHEN amount < 0 THEN amount END), 0) expenses
+			COALESCE(SUM(CASE WHEN amount > 0 THEN ${PLN} END), 0) income,
+			COALESCE(-SUM(CASE WHEN amount < 0 THEN ${PLN} END), 0) expenses
 		 FROM tx WHERE ${REAL} AND date BETWEEN :from AND :to`,
 		p
 	)!;
@@ -29,16 +50,16 @@ export function totals(p: Period) {
 export function monthly() {
 	return all<{ month: string; income: number; expenses: number }>(
 		`SELECT substr(date,1,7) month,
-			COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0) income,
-			COALESCE(-SUM(CASE WHEN amount < 0 THEN amount END), 0) expenses
+			COALESCE(SUM(CASE WHEN amount > 0 THEN ${PLN} END), 0) income,
+			COALESCE(-SUM(CASE WHEN amount < 0 THEN ${PLN} END), 0) expenses
 		 FROM tx WHERE ${REAL} GROUP BY month ORDER BY month`
 	).map((r) => ({ ...r, saved: r.income - r.expenses }));
 }
 
 export function byCategory(p: Period) {
 	return all<{ category: string; total: number }>(
-		`SELECT COALESCE(category,'Uncategorised') category, -SUM(amount) total
-		 FROM tx WHERE ${REAL} AND amount < 0 AND date BETWEEN :from AND :to
+		`SELECT COALESCE(category,'Uncategorised') category, -SUM(${PLN}) total
+		 FROM tx WHERE ${REAL} AND ${CONVERTIBLE} AND amount < 0 AND date BETWEEN :from AND :to
 		 GROUP BY category ORDER BY total DESC`,
 		p
 	);
@@ -47,8 +68,8 @@ export function byCategory(p: Period) {
 /** Expenses per month per category, for the stacked bar on the dashboard. */
 export function monthlyByCategory() {
 	return all<{ month: string; category: string; total: number }>(
-		`SELECT substr(date,1,7) month, COALESCE(category,'Uncategorised') category, -SUM(amount) total
-		 FROM tx WHERE ${REAL} AND amount < 0
+		`SELECT substr(date,1,7) month, COALESCE(category,'Uncategorised') category, -SUM(${PLN}) total
+		 FROM tx WHERE ${REAL} AND ${CONVERTIBLE} AND amount < 0
 		 GROUP BY month, category ORDER BY month, total DESC`
 	);
 }
@@ -143,24 +164,47 @@ export function bonds(): Bond[] {
 export const bondProjection = () => project(bonds());
 
 /**
- * PLN only. Brokerage imports bring in USD positions and the app does no FX, so adding
- * them at 1:1 would quietly inflate net worth. `excluded()` reports what is left out.
+ * Everything you hold, in PLN. Foreign positions convert at today's rate; a currency we
+ * have no rate for is left out and reported by `excluded()` rather than added at 1:1.
  */
 export function investmentTotals() {
-	const hs = holdings().filter((h) => h.currency === 'PLN');
-	const cost = hs.reduce((s, h) => s + h.cost, 0);
-	const value = hs.reduce((s, h) => s + h.value, 0);
+	const rates = fx();
+	let cost = 0;
+	let value = 0;
+	for (const h of holdings()) {
+		const r = rates.now(h.currency);
+		if (r === undefined) continue;
+		cost += h.cost * r;
+		value += h.value * r;
+	}
 	return { cost, value, pl: value - cost, plPct: cost ? (value - cost) / cost : 0 };
 }
 
 export function netWorth() {
-	const bank = bankBalances().filter((b) => b.currency === 'PLN');
-	const manual = manualBalances().filter((m) => m.currency === 'PLN');
+	const rates = fx();
 	const inv = investmentTotals();
-	const cash = brokerCash();
+	// A balance is worth what it converts to today, whatever date it was struck.
+	const conv = <T extends { currency: string }>(rows: T[]) =>
+		rows.flatMap((r) => {
+			const rate = rates.now(r.currency);
+			return rate === undefined ? [] : [{ row: r, rate }];
+		});
+
+	const cash = cashBalances().reduce(
+		(s, c) => s + c.balance * (rates.now(c.currency) ?? 0),
+		0
+	);
 	const parts = [
-		...bank.map((b) => ({ label: b.label, value: b.balance, as_of: b.date })),
-		...manual.map((m) => ({ label: m.label, value: m.value, as_of: m.month })),
+		...conv(bankBalances()).map(({ row, rate }) => ({
+			label: row.label,
+			value: row.balance * rate,
+			as_of: row.date
+		})),
+		...conv(manualBalances()).map(({ row, rate }) => ({
+			label: row.label,
+			value: row.value * rate,
+			as_of: row.month
+		})),
 		// The broker's cash ledger has no balance column, so this is a running sum of
 		// every operation imported — right only if the export starts at account opening.
 		...(cash ? [{ label: 'Brokerage cash', value: cash, as_of: 'ledger' }] : []),
@@ -169,23 +213,35 @@ export function netWorth() {
 	return { parts, total: parts.reduce((s, p) => s + p.value, 0) };
 }
 
-type Lots = Map<string, { qty: number; cost: number }>;
+/** Keyed by ISIN and currency: the same ISIN on two markets is two cost bases. */
+type Lots = Map<string, { qty: number; cost: number; currency: string }>;
 
 /**
- * The open broker position per ISIN after every month that traded, PLN only. Months
- * without a trade are absent: the position is unchanged, but its market value is not,
- * so the caller carries the lots forward and re-prices them.
+ * The open broker position per ISIN after every month that traded. Months without a
+ * trade are absent: the position is unchanged, but its market value is not, so the
+ * caller carries the lots forward and re-prices them.
+ *
+ * Cost stays in the currency it was paid in — the caller converts, because which rate
+ * applies depends on the month being drawn.
  */
 function stockLotsByMonth(): Map<string, Lots> {
 	// ponytail: average cost, not FIFO — this only feeds a chart, and cost is just the
 	// fallback for months with no close.
 	const pos: Lots = new Map();
 	const out = new Map<string, Lots>();
-	for (const t of all<{ date: string; isin: string; side: string; qty: number; net: number }>(
-		`SELECT date, time, isin, side, qty, net FROM trade WHERE currency = 'PLN'
+	for (const t of all<{
+		date: string;
+		isin: string;
+		side: string;
+		qty: number;
+		net: number;
+		currency: string;
+	}>(
+		`SELECT date, time, isin, side, qty, net, currency FROM trade
 		 ORDER BY date ASC, time ASC, seq ASC`
 	)) {
-		const p = pos.get(t.isin) ?? { qty: 0, cost: 0 };
+		const key = `${t.isin}|${t.currency}`;
+		const p = pos.get(key) ?? { qty: 0, cost: 0, currency: t.currency };
 		if (t.side === 'K') {
 			p.qty += t.qty;
 			p.cost += t.net;
@@ -194,7 +250,7 @@ function stockLotsByMonth(): Map<string, Lots> {
 			p.qty -= t.qty;
 			p.cost = Math.max(0, p.cost - avg * t.qty);
 		}
-		pos.set(t.isin, p);
+		pos.set(key, p);
 		// Snapshot, not a reference — `pos` keeps mutating as the walk goes on.
 		out.set(t.date.slice(0, 7), new Map([...pos].map(([k, v]) => [k, { ...v }])));
 	}
@@ -211,25 +267,31 @@ function stockLotsByMonth(): Map<string, Lots> {
 export function netWorthSeries() {
 	const months = monthsCovered();
 
-	const bank = all<{ label: string; month: string; balance: number }>(
-		`SELECT a.label, substr(t.date,1,7) month, t.balance FROM tx t
+	// Every currency is carried through and converted at the rate of the month being
+	// drawn, so a past month reads as it did then rather than at today's rate.
+	const rates = fx();
+	const at = (currency: string, month: string) => rates.on(currency, month);
+
+	const bank = all<{ label: string; month: string; balance: number; currency: string }>(
+		`SELECT a.label, substr(t.date,1,7) month, t.balance, t.currency FROM tx t
 		 JOIN account a ON a.iban = t.account
-		 WHERE t.currency = 'PLN' AND a.in_net_worth = 1 AND t.rowid = (
-			SELECT rowid FROM tx WHERE account = t.account AND substr(date,1,7) = substr(t.date,1,7)
+		 WHERE a.in_net_worth = 1 AND t.rowid = (
+			SELECT rowid FROM tx WHERE account = t.account AND currency = t.currency
+			  AND substr(date,1,7) = substr(t.date,1,7)
 			ORDER BY date DESC, seq ASC LIMIT 1
 		 )`
 	);
-	const manual = all<{ label: string; month: string; value: number }>(
-		`SELECT a.label, s.month, s.value FROM snapshot s
+	const manual = all<{ label: string; month: string; value: number; currency: string }>(
+		`SELECT a.label, s.month, s.value, a.currency FROM snapshot s
 		 JOIN account a ON a.id = s.account_id
-		 WHERE a.in_net_worth = 1 AND a.currency = 'PLN'`
+		 WHERE a.in_net_worth = 1`
 	);
-	const cash = all<{ month: string; total: number }>(
-		`SELECT substr(date,1,7) month, SUM(amount) total FROM cashop
-		 WHERE currency = 'PLN' GROUP BY month ORDER BY month`
+	const cash = all<{ month: string; total: number; currency: string }>(
+		`SELECT substr(date,1,7) month, SUM(amount) total, currency FROM cashop
+		 GROUP BY month, currency ORDER BY month`
 	);
 
-	const hs = holdings().filter((h) => h.currency === 'PLN');
+	const hs = holdings().filter((h) => rates.known.has(h.currency));
 	const bondsHeld = hs.filter((h) => h.kind === 'bond');
 	const ownStocks = hs.filter((h) => h.kind !== 'bond' && h.source !== 'broker');
 	const stockLots = stockLotsByMonth();
@@ -267,11 +329,24 @@ export function netWorthSeries() {
 		if (!m) sparse.set(label, (m = new Map()));
 		m.set(month, value);
 	};
-	for (const b of bank) point(b.label, b.month, b.balance);
-	for (const m of manual) point(m.label, m.month, m.value);
-	// The broker's ledger has no balance column, so cash is a running sum over it.
-	let running = 0;
-	for (const c of cash) point('Brokerage cash', c.month, (running += c.total));
+	for (const b of bank) {
+		const r = at(b.currency, b.month);
+		if (r !== undefined) point(b.label, b.month, b.balance * r);
+	}
+	for (const m of manual) {
+		const r = at(m.currency, m.month);
+		if (r !== undefined) point(m.label, m.month, m.value * r);
+	}
+	// The broker's ledger has no balance column, so cash is a running sum over it. The
+	// sum runs in each currency and is converted after, never the other way round: adding
+	// USD and PLN first and converting the pile would be meaningless.
+	const running = new Map<string, number>();
+	for (const c of cash) {
+		running.set(c.currency, (running.get(c.currency) ?? 0) + c.total);
+		let total = 0;
+		for (const [currency, balance] of running) total += balance * (at(currency, c.month) ?? 0);
+		point('Brokerage cash', c.month, total);
+	}
 	// Broker stocks are re-priced every month, not just the ones that traded, so the
 	// line moves with the market between trades. Lots carry forward; prices do not.
 	let lots: Lots = new Map();
@@ -279,10 +354,14 @@ export function netWorthSeries() {
 		lots = stockLots.get(month) ?? lots;
 		if (!lots.size) continue;
 		let value = 0;
-		for (const [isin, p] of lots) {
+		for (const [key, p] of lots) {
 			if (p.qty <= 1e-9) continue;
-			const close = closeAt(symbolOf.get(isin), month);
-			value += close === undefined ? p.cost : p.qty * close;
+			const rate = at(p.currency, month);
+			if (rate === undefined) continue;
+			// The close is quoted in the listing's own currency, as is the cost it falls
+			// back to, so the conversion is the same either way.
+			const close = closeAt(symbolOf.get(key.split('|')[0]), month);
+			value += (close === undefined ? p.cost : p.qty * close) * rate;
 		}
 		point('Stocks', month, value);
 	}
@@ -299,8 +378,11 @@ export function netWorthSeries() {
 		sources.push({
 			label: 'Bonds',
 			values: allMonths.map(
-				held(bondsHeld, (h, month) =>
-					isBond(h) ? valueAt(h as unknown as Bond, month) : h.qty * h.buy_price
+				held(
+					bondsHeld,
+					(h, month) =>
+						(isBond(h) ? valueAt(h as unknown as Bond, month) : h.qty * h.buy_price) *
+						(at(h.currency, month) ?? 0)
 				)
 			)
 		});
@@ -308,7 +390,13 @@ export function netWorthSeries() {
 		sources.push({
 			label: 'Own holdings',
 			values: allMonths.map(
-				held(ownStocks, (h, month) => h.qty * (closeAt(h.symbol ?? undefined, month) ?? h.buy_price))
+				held(
+					ownStocks,
+					(h, month) =>
+						h.qty *
+						(closeAt(h.symbol ?? undefined, month) ?? h.buy_price) *
+						(at(h.currency, month) ?? 0)
+				)
 			)
 		});
 
@@ -376,18 +464,22 @@ export type Excluded = {
 	rateAt: string;
 	/** 'market' = today's Yahoo rate; 'own' = the rate you last converted at yourself. */
 	rateSource: 'market' | 'own' | '';
+	/** True once real rates exist, meaning these amounts are already inside the totals. */
+	converted: boolean;
 };
 
 /**
- * Everything the PLN figures deliberately leave out, per currency, so every page tells
- * the same story. The app does no FX: a USD position added at 1:1 would quietly inflate
- * net worth, so it is reported here instead of being counted anywhere.
+ * Foreign money and what it converts to, per currency, so every page tells the same
+ * story about it. Anything with a rate IS now counted in the totals — at the rate of the
+ * month or day in question, not today's. A currency with no rate at all is still left
+ * out entirely, and `converted` says which case you are looking at.
  */
 export function excluded(): Excluded[] {
 	// The market rate when we have one, otherwise the rate the user themself converted at.
 	// Both are for reading only — no total on this page is ever FX-converted.
 	const own = new Map(fxRates().map((f) => [f.pair.split('/')[1], f]));
 	const market = new Map(latestRates().map((r) => [r.currency, r]));
+	const convertible = fx().known;
 	const per = new Map<string, Excluded>();
 	const row = (currency: string) => {
 		let r = per.get(currency);
@@ -404,7 +496,10 @@ export function excluded(): Excluded[] {
 					cash: 0,
 					rate: fx?.rate ?? 0,
 					rateAt: fx?.date ?? '',
-					rateSource: live ? 'market' : mine ? 'own' : ''
+					rateSource: live ? 'market' : mine ? 'own' : '',
+					// Only a real rate series feeds the totals; the user's own past
+					// conversion is a reading aid, never arithmetic.
+					converted: convertible.has(currency)
 				})
 			);
 		}
