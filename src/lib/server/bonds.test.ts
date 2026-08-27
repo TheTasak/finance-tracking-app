@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { type Bond, accruals, project, totalInterest, valueAt } from './bonds.ts';
+import { type Bond, accruals, interestTo, project, totalInterest, valueAt } from './bonds.ts';
 
 /** The example from the brief: 3-year, fixed 5% annual, capitalised monthly. */
 const THREE_YEAR: Bond = {
@@ -44,8 +44,9 @@ test('valueAt walks the curve and never runs past maturity', () => {
 test('annual and quarterly frequencies credit the right number of times', () => {
 	const annual = { ...THREE_YEAR, compound_freq: 'annual' as const };
 	const quarterly = { ...THREE_YEAR, compound_freq: 'quarterly' as const };
-	assert.equal(accruals(annual).length, 3);
-	assert.equal(accruals(quarterly).length, 12);
+	// Every frequency earns monthly; the frequency only says how often it compounds.
+	assert.equal(accruals(annual).length, 36);
+	assert.equal(accruals(quarterly).length, 36);
 
 	// Same nominal rate, more frequent compounding => strictly more interest.
 	assert.ok(totalInterest(annual) < totalInterest(quarterly));
@@ -58,19 +59,20 @@ test('a payout bond stays at par and pays simple interest', () => {
 	assert.equal(valueAt(payout, '2029-05'), 10000, 'principal is unchanged');
 	// 3 x 500, no compounding.
 	assert.ok(Math.abs(totalInterest(payout) - 1500) < 1e-9);
-	for (const a of accruals(payout)) assert.ok(Math.abs(a.interest - 500) < 1e-9);
+	for (const a of accruals(payout)) assert.ok(Math.abs(a.interest - 500 / 12) < 1e-9);
 });
 
 test('a stub period shorter than a full quarter accrues pro-rata', () => {
 	// 14 months on a quarterly bond => 4 full quarters + a 2-month stub.
 	const stub: Bond = { ...THREE_YEAR, maturity: '2027-07-01', compound_freq: 'quarterly' };
 	const rows = accruals(stub);
-	assert.equal(rows.length, 5);
+	assert.equal(rows.length, 14);
 	assert.equal(rows.at(-1)!.month, '2027-07');
-	// Stub is 2/3 of a quarter.
-	const full = rows[3].interest;
-	assert.ok(rows.at(-1)!.interest < full);
-	assert.ok(Math.abs(rows.at(-1)!.interest / (rows[3].balance * (0.05 / 4)) - 2 / 3) < 1e-9);
+	// The stub is 2 of a quarter's 3 months, so it earns two monthly slices, not three.
+	const base = rows[11].balance; // capitalised through the fourth quarter
+	const stubInterest = rows.slice(12).reduce((t, a) => t + a.interest, 0);
+	assert.ok(Math.abs(stubInterest - (base * 0.05) / 6) < 1e-9);
+	assert.ok(Math.abs(stubInterest / (base * (0.05 / 4)) - 2 / 3) < 1e-9);
 });
 
 test('project sums bonds onto one timeline and nets off Belka tax', () => {
@@ -90,10 +92,11 @@ test('project sums bonds onto one timeline and nets off Belka tax', () => {
 	assert.equal(p.byBond.length, 2);
 	assert.equal(p.cumulative.length, p.months.length);
 
-	// The one-year bond credits exactly once, in 2027-05.
+	// The one-year bond earns through all twelve of its months, 50 in total.
 	const bond2 = p.byBond.find((b) => b.id === 2)!;
-	assert.equal(bond2.data.filter((v) => v > 0).length, 1);
-	assert.ok(Math.abs(bond2.data[p.months.indexOf('2027-05')] - 50) < 1e-9);
+	assert.equal(bond2.data.filter((v) => v > 0).length, 12);
+	assert.ok(Math.abs(bond2.data.reduce((t, v) => t + v, 0) - 50) < 1e-9);
+	assert.ok(Math.abs(bond2.data[p.months.indexOf('2027-05')] - 50 / 12) < 1e-9);
 
 	const gross = totalInterest(THREE_YEAR) + totalInterest(other);
 	assert.ok(Math.abs(p.cumulative.at(-1)! - gross) < 1e-6);
@@ -107,4 +110,24 @@ test('an unfinished or backwards bond projects nothing instead of looping', () =
 	assert.deepEqual(accruals({ ...THREE_YEAR, maturity: THREE_YEAR.buy_date }), []);
 	assert.deepEqual(accruals({ ...THREE_YEAR, qty: 0 }), []);
 	assert.deepEqual(project([]).months, []);
+});
+
+test('a yearly bond earns every month, not only on its anniversary', () => {
+	const annual: Bond = { ...THREE_YEAR, compound_freq: 'annual' };
+	const rows = accruals(annual);
+
+	// The reported bug: nothing showed until the first anniversary.
+	assert.ok(interestTo(annual, '2026-06') > 0, 'one month in, one month of interest');
+	assert.ok(Math.abs(interestTo(annual, '2026-06') - 10000 * (0.05 / 12)) < 1e-9);
+	assert.ok(Math.abs(interestTo(annual, '2027-05') - 500) < 1e-9, 'a year in, a full coupon');
+
+	// And the flat chart: within a year every month earns the same, and no month is a spike.
+	const year = rows.slice(0, 12).map((a) => a.interest);
+	assert.ok(year.every((v) => Math.abs(v - year[0]) < 1e-9));
+	assert.ok(Math.max(...rows.map((a) => a.interest)) < 2 * Math.min(...rows.map((a) => a.interest)));
+
+	// Value follows along instead of stepping once a year, and still lands on the coupon.
+	assert.ok(valueAt(annual, '2026-06') > 10000);
+	assert.ok(Math.abs(valueAt(annual, '2027-05') - 10500) < 1e-9);
+	assert.ok(Math.abs(totalInterest(annual) - (10000 * 1.05 ** 3 - 10000)) < 1e-6);
 });

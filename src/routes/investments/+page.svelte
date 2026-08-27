@@ -508,7 +508,28 @@
 					<tr>
 						<td><strong>{b.ticker}</strong><div class="note">{b.name}</div></td>
 						<td>
-							{#if b.isBond}
+							{#if b.source === 'treasury'}
+								<!-- The .xls export has no rate in it: it belongs to the emission, not the
+								     purchase, so it is typed in here once and survives every re-import. -->
+								<form method="POST" action="?/setRate" class="row" use:enhance>
+									<input type="hidden" name="id" value={b.id} />
+									<input
+										type="number"
+										name="coupon_rate"
+										step="0.01"
+										min="0"
+										required
+										placeholder="% p.a."
+										style="width:5.5rem"
+										value={b.coupon_rate ? (b.coupon_rate * 100).toFixed(2) : ''}
+									/>
+									<button type="submit">Rate</button>
+								</form>
+								<div class="note">
+									{b.compound_freq} · {b.capitalize ? 'capitalised' : 'paid out'} · {b.buy_date} →
+									{b.maturity}
+								</div>
+							{:else if b.isBond}
 								{percent(b.coupon_rate ?? 0)} p.a. · {b.compound_freq}
 								<span class="badge">{b.capitalize ? 'capitalised' : 'paid out'}</span>
 								<div class="note">{b.buy_date} → {b.maturity}</div>

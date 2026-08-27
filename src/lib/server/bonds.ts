@@ -1,9 +1,13 @@
 /**
  * Bond accrual projection.
  *
- * ponytail: everything is on month granularity — a period is credited on a month
- * boundary, never on an exact day count. Real day-count conventions (ACT/365 etc.)
- * shift a coupon by a few złoty; swap monthIndex() for a day-count if that matters.
+ * Interest is earned every month and *capitalised* on the period boundary — the two are
+ * not the same event. Crediting a whole coupon on its anniversary instead would leave a
+ * yearly bond showing no interest for eleven months and a spike on the twelfth.
+ *
+ * ponytail: everything is on month granularity — a month is a twelfth of a year, never
+ * an exact day count. Real day-count conventions (ACT/365 etc.) shift a coupon by a few
+ * złoty; swap monthIndex() for a day-count if that matters.
  */
 
 export const BELKA = 0.19; // PL flat tax on interest income
@@ -40,32 +44,37 @@ const monthLabel = (idx: number) =>
 export type Accrual = { month: string; interest: number; balance: number };
 
 /**
- * One row per interest credit, from the purchase month to maturity.
- * `balance` is principal + capitalised interest after that credit.
+ * One row per month, from the month after purchase to maturity. `interest` is what that
+ * month earned; `balance` is what the holding is worth at the end of it — capitalised
+ * principal plus whatever has accrued since the last capitalisation.
  */
 export function accruals(b: Bond): Accrual[] {
 	const principal = b.qty * b.buy_price;
 	const perYear = PERIODS[b.compound_freq] ?? 1;
-	const step = 12 / perYear;
-	const ratePerPeriod = b.coupon_rate / perYear;
+	const step = 12 / perYear; // months between capitalisations
 
 	const start = monthIndex(b.buy_date);
 	const end = monthIndex(b.maturity);
 	if (!(end > start) || !(principal > 0)) return [];
 
 	const out: Accrual[] = [];
-	let balance = principal;
+	let base = principal; // what interest is reckoned on
+	let pending = 0; // earned since the last capitalisation
 
-	for (let m = start + step; ; m += step) {
-		// A final stub shorter than a full period still accrues, pro-rata by months.
-		const capped = Math.min(m, end);
-		const fraction = (capped - (m - step)) / step;
-		const interest = balance * ratePerPeriod * fraction;
+	for (let m = start + 1; m <= end; m++) {
+		// Simple within the period, compounded at its end: a period's monthly slices add
+		// up to exactly its coupon on `base`, so a short final stub needs no pro-rating —
+		// it simply has fewer months in it.
+		const interest = (base * b.coupon_rate) / 12;
+		pending += interest;
 
-		if (b.capitalize) balance += interest;
-		out.push({ month: monthLabel(capped), interest, balance });
-
-		if (capped >= end) break;
+		if ((m - start) % step === 0 || m === end) {
+			if (b.capitalize) base += pending;
+			pending = 0;
+		}
+		// A payout bond's interest leaves the bond, so only a capitalising one is worth
+		// more than par between capitalisations.
+		out.push({ month: monthLabel(m), interest, balance: base + (b.capitalize ? pending : 0) });
 	}
 	return out;
 }

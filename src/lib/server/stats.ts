@@ -273,13 +273,17 @@ export function netWorthSeries() {
 	const at = (currency: string, month: string) => rates.on(currency, month);
 
 	const bank = all<{ label: string; month: string; balance: number; currency: string }>(
-		`SELECT a.label, substr(t.date,1,7) month, t.balance, t.currency FROM tx t
-		 JOIN account a ON a.iban = t.account
-		 WHERE a.in_net_worth = 1 AND t.rowid = (
-			SELECT rowid FROM tx WHERE account = t.account AND currency = t.currency
-			  AND substr(date,1,7) = substr(t.date,1,7)
-			ORDER BY date DESC, seq ASC LIMIT 1
-		 )`
+		// Last row of each account-currency-month, ranked in one pass rather than by a
+		// correlated LIMIT 1 that re-scanned the account's history for every row of it.
+		`SELECT label, month, balance, currency FROM (
+			SELECT a.label, substr(t.date,1,7) month, t.balance, t.currency,
+				ROW_NUMBER() OVER (
+					PARTITION BY t.account, t.currency, substr(t.date,1,7)
+					ORDER BY t.date DESC, t.seq ASC
+				) rn
+			FROM tx t JOIN account a ON a.iban = t.account
+			WHERE a.in_net_worth = 1
+		 ) WHERE rn = 1 ORDER BY label, month`
 	);
 	const manual = all<{ label: string; month: string; value: number; currency: string }>(
 		`SELECT a.label, s.month, s.value, a.currency FROM snapshot s

@@ -558,6 +558,17 @@ test('a rate lookup uses the last rate quoted on or before the date asked for', 
 	run(`DELETE FROM price`);
 });
 
+test('a rate written after the series was read is not served from the cache', () => {
+	run(`DELETE FROM price`);
+	run(`INSERT INTO price (symbol, date, close) VALUES ('EURPLN=X', '2025-06-02', 4.0)`);
+	assert.equal(P.fx().now('EUR'), 4.0);
+	// The whole point of the memo is that this second read is free — and still right.
+	run(`INSERT INTO price (symbol, date, close) VALUES ('EURPLN=X', '2025-06-03', 9.0)`);
+	assert.equal(P.fx().now('EUR'), 9.0, 'the memo must expire when the price table changes');
+	run(`DELETE FROM price`);
+	assert.equal(P.fx().now('EUR'), undefined, 'and again when the rates go away');
+});
+
 test('a past month converts at its own rate, not at today’s', () => {
 	run(`DELETE FROM price`);
 	// Rates first, so the baseline already includes any other foreign row in the file and

@@ -124,6 +124,18 @@ export const actions: Actions = {
 		return { ok: true };
 	},
 
+	/** An imported bond has no rate in its export — the emission's rate is typed in here. */
+	setRate: async ({ request }) => {
+		const f = await request.formData();
+		const ratePct = num(f.get('coupon_rate'));
+		if (!(ratePct >= 0)) return fail(400, { error: 'Interest rate must be a number.' });
+		run(`UPDATE holding SET coupon_rate = :rate WHERE id = :id AND kind = 'bond'`, {
+			id: Number(f.get('id')),
+			rate: ratePct / 100
+		});
+		return { ok: true };
+	},
+
 	/** Tag a holding with the Yahoo ticker its price comes from. Blank stops tracking it. */
 	setSymbol: async ({ request }) => {
 		const f = await request.formData();

@@ -5,9 +5,12 @@ manually-tracked investments and external accounts.
 
 ```bash
 npm run dev                        # http://localhost:5173
-npm test                           # bond math + all three CSV importers
+npm test                           # bond math, every importer, prices and FX
 npm run build && node build/index.js
 ```
+
+How the code is laid out: [docs/architecture.md](docs/architecture.md). What the
+importable files look like: [docs/formats.md](docs/formats.md).
 
 Data lives in `data/finance.db` (SQLite via the built-in `node:sqlite` — no native
 build step). It is gitignored. Delete the file to start over; the schema is
@@ -22,7 +25,7 @@ recreated on boot and missing columns are added automatically.
 | Investments | Positions, bonds, money made (gains, dividends, coupons, fees), trade history, cash ledger |
 | Projection | Whole-fortune forecast, emergency runway, financial-independence target |
 | Accounts | Rename bank accounts, add manual ones (other banks, XTB, Revolut), type monthly balances |
-| Import | Upload a Millennium CSV, a Bossa `hisPW` CSV, or a Bossa cash ledger |
+| Import | Upload a Millennium CSV, a Bossa `hisPW` CSV, a Bossa cash ledger, or an obligacjeskarbowe.pl `.xls` |
 
 ## Things worth knowing
 
@@ -117,10 +120,14 @@ sliders recompute in the browser, so nothing round-trips to the server.
 
 ## Not included
 
-- FX conversion. Non-PLN positions and cash are stored, priced and shown in their own
-  currency, but never added to a PLN total. The Investments page prints them beside the
-  PLN figures with the rate you last converted at yourself, for reading only.
-- Automatic share prices. Stock prices are typed by hand, imported positions included.
+- FX for a currency the feed has never quoted. Amounts *are* converted, at the stored
+  `<CUR>PLN=X` rates: a transaction at the rate in force on its own date, a balance or a
+  holding at the newest rate. A currency with no rate at all is left out of every total
+  and reported separately rather than counted at 1:1.
+- Prices for a holding with no Yahoo ticker. Tag a holding with one (`CDR.WA`, `AAPL`)
+  and *Refresh prices* pulls its daily closes and the FX rates; anything untagged keeps
+  the price you typed. A listing quoted in a currency you do not hold it in is refused
+  rather than converted.
 - Share splits. Neither export lists them, so a split silently changes the quantity
   and makes the old cost basis per share wrong.
 - Withholding tax on dividends. Gross amounts are recorded as the broker paid them.

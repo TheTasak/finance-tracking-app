@@ -146,11 +146,42 @@ export type Fx = {
 	known: Set<string>;
 };
 
-export function fx(): Fx {
+/**
+ * A cache key for read-only work that cannot go stale, unlike a flag every new write path
+ * would have to remember to set. `total_changes` counts the rows this connection has
+ * written; `data_version` moves when anyone else commits — together they cover a write
+ * from anywhere. Costs ~6µs, against ~15ms to reload the series it guards.
+ */
+const version = () => {
+	const v = get<{ c: number; v: number }>(
+		`SELECT total_changes() c, (SELECT * FROM pragma_data_version()) v`
+	)!;
+	return `${v.c}|${v.v}`;
+};
+
+/**
+ * Re-run `fn` only once the database has changed since its last result. One dashboard
+ * render asks for the same series several times over and nothing writes in between — and
+ * every figure in that render must convert at the same rates anyway.
+ *
+ * The same object comes back each time, so callers read it and never mutate it.
+ */
+const cached = <T>(fn: () => T): (() => T) => {
+	let memo: { at: string; value: T } | undefined;
+	return () => {
+		const at = version();
+		if (memo?.at !== at) memo = { at, value: fn() };
+		return memo.value;
+	};
+};
+
+export const fx = cached((): Fx => {
 	const series = new Map<string, { dates: string[]; rates: number[] }>();
 	for (const r of all<{ currency: string; date: string; close: number }>(
+		// Ordered by symbol, not by the aliased currency: every symbol carries the same
+		// suffix so the order is identical, and this one comes free off price_fx.
 		`SELECT replace(symbol, 'PLN=X', '') currency, date, close FROM price
-		 WHERE symbol LIKE '%PLN=X' ORDER BY currency, date`
+		 WHERE symbol LIKE '%PLN=X' ORDER BY symbol, date`
 	)) {
 		let s = series.get(r.currency);
 		if (!s) series.set(r.currency, (s = { dates: [], rates: [] }));
@@ -180,10 +211,10 @@ export function fx(): Fx {
 
 	return {
 		on,
-		now: (currency) => on(currency, '9999-12-31'),
+		now: (currency: string) => on(currency, '9999-12-31'),
 		known: new Set(['PLN', ...series.keys()])
 	};
-}
+});
 
 /** Newest close stored for a symbol, if any. */
 const latest = (symbol: string) =>
@@ -259,15 +290,20 @@ export async function refreshPrices(): Promise<Refreshed[]> {
  * Month-end close per symbol, for valuing past holdings on the net-worth chart. The
  * last close *in* the month, so a month that ended on a holiday still gets a price.
  */
-export function monthEndCloses(): Map<string, Map<string, number>> {
+export const monthEndCloses = cached((): Map<string, Map<string, number>> => {
 	const out = new Map<string, Map<string, number>>();
 	for (const r of all<{ symbol: string; month: string; close: number }>(
-		`SELECT symbol, substr(date,1,7) month, close FROM price p
-		 WHERE date = (SELECT MAX(date) FROM price WHERE symbol = p.symbol AND substr(date,1,7) = substr(p.date,1,7))`
+		// Ranked in one pass. The correlated MAX(date) this replaces re-scanned every
+		// close of the symbol for every row of it — seconds, on a decade of dailies.
+		`SELECT symbol, month, close FROM (
+			SELECT symbol, substr(date,1,7) month, close,
+				ROW_NUMBER() OVER (PARTITION BY symbol, substr(date,1,7) ORDER BY date DESC) rn
+			FROM price
+		 ) WHERE rn = 1`
 	)) {
 		let m = out.get(r.symbol);
 		if (!m) out.set(r.symbol, (m = new Map()));
 		m.set(r.month, r.close);
 	}
 	return out;
-}
+});

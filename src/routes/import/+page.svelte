@@ -34,6 +34,14 @@
 			span: data.ops,
 			unit: 'operations',
 			note: 'The full cash history: dividends, bond coupons and redemptions, deposits, currency exchanges, tender offers, fees — and the fills again, which collapse onto the ones hisPW already gave. This is the more complete file; hisPW covers one market only.'
+		},
+		{
+			id: 'bonds',
+			title: 'Treasury bonds — Konto Rejestrowe',
+			span: data.bonds,
+			unit: 'bond series',
+			accept: '.xls',
+			note: 'The “Historia dyspozycji” .xls, exactly as downloaded. Purchases of one series merge into a single holding. The export has no interest rate — type it in once per series on the portfolio page and it survives every re-import.'
 		}
 	]);
 </script>
@@ -60,7 +68,7 @@
 			use:enhance={submit(s.id)}
 		>
 			<label class="field">
-				CSV file<input type="file" name="csv" accept=".csv,text/csv" required />
+				File<input type="file" name="csv" accept={s.accept ?? '.csv,text/csv'} required />
 			</label>
 			<button type="submit" disabled={!!busy}>{busy === s.id ? 'Importing…' : 'Import'}</button>
 		</form>

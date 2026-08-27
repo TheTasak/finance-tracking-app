@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS tx (
   seq INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS tx_date ON tx(date);
+-- "the account's latest row" is asked per account and answered by a seek instead of a
+-- scan of the whole ledger. DESC/ASC match the order that question is asked in, so the
+-- answer is the first index entry read rather than a sort of everything the account has.
+CREATE INDEX IF NOT EXISTS tx_account_date ON tx(account, date DESC, seq ASC);
 
 CREATE TABLE IF NOT EXISTS holding (
   id INTEGER PRIMARY KEY,
@@ -91,6 +95,9 @@ CREATE TABLE IF NOT EXISTS price (
   symbol TEXT, date TEXT, close REAL,
   PRIMARY KEY (symbol, date)
 );
+-- Rates are a tenth of this table but every FX lookup used to scan all of it: the
+-- '%PLN=X' suffix cannot use the primary key. Covering, so the scan never leaves it.
+CREATE INDEX IF NOT EXISTS price_fx ON price(symbol, date, close) WHERE symbol LIKE '%PLN=X';
 
 CREATE TABLE IF NOT EXISTS rule (
   id INTEGER PRIMARY KEY, pattern TEXT, category TEXT
