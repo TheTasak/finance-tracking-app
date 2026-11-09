@@ -22,6 +22,14 @@
 			note: 'Rows are keyed by a hash of account, date, amount, description and balance, so re-uploading an overlapping export adds only what is new.'
 		},
 		{
+			id: 'pko',
+			title: 'Bank — PKO BP',
+			span: data.bank,
+			unit: 'bank transactions (all banks)',
+			account: true,
+			note: 'The “Historia operacji” CSV, exactly as downloaded (Windows-1250). The export never says which account it came from, so type the 26-digit account number once — it is remembered after the first import.'
+		},
+		{
 			id: 'bossa',
 			title: 'Brokerage fills — Bossa hisPW',
 			span: data.trades,
@@ -67,6 +75,17 @@
 			style="margin-top:.75rem"
 			use:enhance={submit(s.id)}
 		>
+			{#if s.account}
+				<label class="field">
+					Account number<input
+						name="account"
+						required
+						size="34"
+						placeholder="12 1020 0000 0000 0000 0000 0000"
+						value={data.pkoAccounts[0] ?? ''}
+					/>
+				</label>
+			{/if}
 			<label class="field">
 				File<input type="file" name="csv" accept={s.accept ?? '.csv,text/csv'} required />
 			</label>

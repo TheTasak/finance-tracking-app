@@ -1,6 +1,6 @@
 # Import formats
 
-Four files, four parsers, all in `src/lib/server/`. Every parser is pure: text or bytes
+Five files, five parsers, all in `src/lib/server/`. Every parser is pure: text or bytes
 in, rows out, `throw new Error` naming the row and the problem on anything it cannot
 read. Nothing touches the database until the matching `import*()` runs, and that runs in
 one transaction.
@@ -23,6 +23,24 @@ by Polish header name, not position: `Numer rachunku/karty`, `Data transakcji`,
 - Row id: `sha256(account|date|amount|description|balance)`.
 - Every account in the file is registered in `account` *before* the rows are inserted, so
   own-transfer detection works on the very first import.
+
+## 1b. PKO BP — "Historia operacji" CSV
+
+`import.ts` · `parsePko(text, account)` → `tx` (same `Row` and `importRows()` as Millennium)
+
+**Windows-1250**, comma-separated, `""` escapes. Columns: `Data operacji`, `Data waluty`,
+`Typ transakcji`, `Kwota` (signed), `Waluta`, `Saldo po transakcji`, `Opis transakcji`,
+followed by unnamed columns. Those columns hold `"Label: value"` cells such as `Rachunek odbiorcy`/`nadawcy`,
+`Nazwa odbiorcy`/`nadawcy`, `Tytuł` and `Lokalizacja`.
+
+- **The export never names its own account.** The import form asks for the 26-digit
+  number and prefills it from any account with PKO's bank code (`1020`) already in `tx`.
+- Counterparty = `Nazwa …`, else the `Adres:` part of `Lokalizacja` (web/card payments);
+  a `Tytuł` that is only digits (a payment reference) is replaced by that address.
+- Days come newest-first, but rows **within a day are not ordered**. `seq` is rebuilt per
+  day from the balance chain (`balance − amount` = previous row's balance), falling back to file
+  order if the chain does not close, so `date DESC, seq ASC` finds the closing balance.
+- Row id: `sha256(account|date|amount|all detail cells|balance)`.
 
 ## 2. Bossa — `hisPW` (exchange fills)
 
@@ -104,7 +122,7 @@ Columns: `DATA DYSPOZYCJI`, `RODZAJ DYSPOZYCJI`, `KOD OBLIGACJI`, `LICZBA OBLIGA
 - Nothing is ever deleted: redemption has no row in this export yet, so a matured series
   is removed by hand.
 
-## Adding a fifth source
+## Adding another source
 
 1. `parse*()` in `lib/server/` — pure, header-name lookup, throw with the row number.
 2. `import*()` — natural-key id, `INSERT OR IGNORE`, wrapped in `tx()`.
