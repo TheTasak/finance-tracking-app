@@ -1,6 +1,6 @@
 # finance-app
 
-Personal finance tracker for Bank Millennium and Bossa CSV exports, plus
+Personal finance tracker for Bank Millennium, PKO BP and Bossa CSV exports, plus
 manually-tracked investments and external accounts.
 
 ```bash
@@ -30,7 +30,7 @@ recreated on boot and missing columns are added automatically.
 | Investments | Positions, bonds, money made (gains, dividends, coupons, fees), trade history, cash ledger |
 | Projection | Whole-fortune forecast, emergency runway, financial-independence target |
 | Accounts | Rename bank accounts, add manual ones (other banks, XTB, Revolut), type monthly balances |
-| Import | Upload a Millennium CSV, a Bossa `hisPW` CSV, a Bossa cash ledger, or an obligacjeskarbowe.pl `.xls` |
+| Import | Upload a Millennium or PKO BP CSV, a Bossa `hisPW` CSV, a Bossa cash ledger, or an obligacjeskarbowe.pl `.xls` |
 
 ## How it fits together
 
